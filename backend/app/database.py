@@ -434,6 +434,18 @@ def get_or_create_field_configs(test_run_id: str, field_keys: List[str]) -> List
     configs = [c for c in _in_memory_db["field_configs"] if c.get("test_run_id") == test_run_id]
     existing_keys = {c["field_key"] for c in configs}
 
+    # Load any stored configs for this run from Supabase (another serverless instance may own them).
+    if supabase_client:
+        try:
+            res = supabase_client.table("field_configs").select("*").eq("test_run_id", test_run_id).execute()
+            for row in res.data or []:
+                if row["field_key"] not in existing_keys:
+                    _in_memory_db["field_configs"].append(row)
+                    configs.append(row)
+                    existing_keys.add(row["field_key"])
+        except Exception as e:
+            print(f"Supabase get_or_create_field_configs error: {e}")
+
     for fk in field_keys:
         if fk in existing_keys:
             continue
@@ -468,11 +480,23 @@ def get_or_create_field_configs(test_run_id: str, field_keys: List[str]) -> List
     return configs
 
 def get_field_config(test_run_id: str, field_key: str) -> Optional[Dict[str, Any]]:
-    return next((c for c in _in_memory_db["field_configs"] if c["test_run_id"] == test_run_id and c["field_key"] == field_key), None)
+    mem = next((c for c in _in_memory_db["field_configs"] if c["test_run_id"] == test_run_id and c["field_key"] == field_key), None)
+    if mem:
+        return mem
+    if supabase_client:
+        try:
+            res = supabase_client.table("field_configs").select("*").eq("test_run_id", test_run_id).eq("field_key", field_key).limit(1).execute()
+            if res.data:
+                row = res.data[0]
+                _in_memory_db["field_configs"].append(row)
+                return row
+        except Exception as e:
+            print(f"Supabase get_field_config error: {e}")
+    return None
 
 def get_batch_field_jobs(batch_id: str) -> List[Dict[str, Any]]:
     """Returns all field jobs for a batch, each with its verification results attached."""
-    jobs = [j for j in _in_memory_db["field_jobs"] if j["batch_id"] == batch_id]
+    jobs = list_field_jobs(batch_id)
     out = []
     for j in jobs:
         out.append({
@@ -480,7 +504,7 @@ def get_batch_field_jobs(batch_id: str) -> List[Dict[str, Any]]:
             "field_key": j["field_key"],
             "status": j["status"],
             "output": j.get("output_json_fragment"),
-            "verification_results": [v for v in _in_memory_db["verification_results"] if v.get("field_job_id") == j["id"]],
+            "verification_results": get_verification_results_for_field(j["id"]),
             "cost": j.get("cost", 0.0),
             "tokens": j.get("tokens", 0),
             "latency_ms": j.get("latency_ms", 0),
@@ -542,6 +566,7 @@ def create_field_job(batch_id: str, field_key: str, system_prompt: str, user_pro
         "cost": 0.0,
         "tokens": 0,
         "latency_ms": 0,
+        "attempt_count": 0,
         "created_at": now,
         "updated_at": now
     }
@@ -564,21 +589,72 @@ def update_field_job(field_job_id: str, update_data: Dict[str, Any]):
         except Exception as e:
             print(f"Supabase field_job update error: {e}")
 
+def _cache_batch(b: Dict[str, Any]) -> Dict[str, Any]:
+    """Upsert a batch row into the in-memory mirror (serverless: instance-local cache)."""
+    existing = next((x for x in _in_memory_db["batches"] if x["id"] == b.get("id")), None)
+    if existing:
+        existing.update(b)
+    else:
+        _in_memory_db["batches"].append(b)
+    return b
+
+def _cache_field_job(j: Dict[str, Any]) -> Dict[str, Any]:
+    existing = next((x for x in _in_memory_db["field_jobs"] if x["id"] == j.get("id")), None)
+    if existing:
+        existing.update(j)
+    else:
+        _in_memory_db["field_jobs"].append(j)
+    return j
+
 def get_batch(batch_id: str) -> Optional[Dict[str, Any]]:
-    return next((b for b in _in_memory_db["batches"] if b["id"] == batch_id), None)
+    mem = next((b for b in _in_memory_db["batches"] if b["id"] == batch_id), None)
+    if mem:
+        return mem
+    if supabase_client:
+        try:
+            res = supabase_client.table("batches").select("*").eq("id", batch_id).limit(1).execute()
+            if res.data:
+                return _cache_batch(res.data[0])
+        except Exception as e:
+            print(f"Supabase get_batch error: {e}")
+    return None
+
+def list_field_jobs(batch_id: str) -> List[Dict[str, Any]]:
+    """All field jobs for a batch, loading from Supabase on cache miss (serverless-safe)."""
+    jobs = [j for j in _in_memory_db["field_jobs"] if j["batch_id"] == batch_id]
+    if jobs or not supabase_client:
+        return jobs
+    try:
+        res = supabase_client.table("field_jobs").select("*").eq("batch_id", batch_id).order("created_at").execute()
+        out = []
+        for row in res.data or []:
+            out.append(_cache_field_job(row))
+        return out
+    except Exception as e:
+        print(f"Supabase list_field_jobs error: {e}")
+        return jobs
 
 def get_batch_status(batch_id: str) -> Optional[Dict[str, Any]]:
     batch = get_batch(batch_id)
     if not batch:
         return None
-    jobs = [j for j in _in_memory_db["field_jobs"] if j["batch_id"] == batch_id]
-    return {"batch": batch, "fields": jobs}
+    return {"batch": batch, "fields": list_field_jobs(batch_id)}
 
 def get_field_job(field_job_id: str) -> Optional[Dict[str, Any]]:
-    return next((j for j in _in_memory_db["field_jobs"] if j["id"] == field_job_id), None)
+    mem = next((j for j in _in_memory_db["field_jobs"] if j["id"] == field_job_id), None)
+    if mem:
+        return mem
+    if supabase_client:
+        try:
+            res = supabase_client.table("field_jobs").select("*").eq("id", field_job_id).limit(1).execute()
+            if res.data:
+                return _cache_field_job(res.data[0])
+        except Exception as e:
+            print(f"Supabase get_field_job error: {e}")
+    return None
 
 def get_field_job_in_batch(batch_id: str, field_key: str) -> Optional[Dict[str, Any]]:
-    return next((j for j in _in_memory_db["field_jobs"] if j["batch_id"] == batch_id and j["field_key"] == field_key), None)
+    return next((j for j in list_field_jobs(batch_id) if j["field_key"] == field_key), None)
 
 def update_batch_status(batch_id: str, status: str):
     batch = get_batch(batch_id)
@@ -604,6 +680,7 @@ def update_batch_plan(batch_id: str, plan_json: Optional[Dict[str, Any]]):
 def save_verification_results_scoped(field_job_id: str, verification_attempt: int, results: List[Dict[str, Any]]):
     """Saves verification results scoped to a field job (v2)."""
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    records = []
     for r in results:
         rec = {
             "id": str(uuid.uuid4()),
@@ -616,17 +693,28 @@ def save_verification_results_scoped(field_job_id: str, verification_attempt: in
             "affected_fields": r.get("affected_fields", []),
             "created_at": now
         }
+        records.append(rec)
         _in_memory_db["verification_results"].append(rec)
     if supabase_client:
         try:
-            supabase_client.table("verification_results").insert(
-                [r for r in _in_memory_db["verification_results"] if r.get("field_job_id") == field_job_id]
-            ).execute()
+            supabase_client.table("verification_results").insert(records).execute()
         except Exception as e:
             print(f"Supabase scoped verification insert error: {e}")
 
 def get_verification_results_for_field(field_job_id: str) -> List[Dict[str, Any]]:
-    return [v for v in _in_memory_db["verification_results"] if v.get("field_job_id") == field_job_id]
+    mem = [v for v in _in_memory_db["verification_results"] if v.get("field_job_id") == field_job_id]
+    if mem or not supabase_client:
+        return mem
+    try:
+        res = supabase_client.table("verification_results").select("*").eq("field_job_id", field_job_id).order("created_at").execute()
+        out = []
+        for row in res.data or []:
+            _in_memory_db["verification_results"].append(row)
+            out.append(row)
+        return out
+    except Exception as e:
+        print(f"Supabase get_verification_results_for_field error: {e}")
+        return mem
 
 def save_regeneration_scoped(field_job_id: str, parameter: str, previous_output: Any, new_output: Any, reason: str):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -646,3 +734,96 @@ def save_regeneration_scoped(field_job_id: str, parameter: str, previous_output:
             supabase_client.table("regenerations").insert(rec).execute()
         except Exception as e:
             print(f"Supabase scoped regeneration insert error: {e}")
+
+
+# =====================================================================
+# Serverless queue helpers
+# =====================================================================
+
+def _parse_iso(ts) -> Optional[datetime.datetime]:
+    if not ts:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def requeue_stale_jobs(batch_id: str, stale_after_sec: int = 120, max_attempts: int = 4) -> int:
+    """Reset field jobs stuck in 'running'/'regenerating' so a later poll can pick them up.
+
+    Serverless instances freeze mid-request; if the instance dies the job stays
+    'running' forever. Any poll older than stale_after_sec resets those jobs to
+    'queued' so the current (alive) instance retries them. Jobs that exceed
+    max_attempts are failed outright so the batch cannot loop forever.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    requeued = 0
+    for j in list_field_jobs(batch_id):
+        if j.get("status") not in {"running", "regenerating"}:
+            continue
+        updated = _parse_iso(j.get("updated_at")) or _parse_iso(j.get("created_at"))
+        if updated and (now - updated).total_seconds() > stale_after_sec:
+            attempts = int(j.get("attempt_count") or 0) + 1
+            if attempts >= max_attempts:
+                update_field_job(j["id"], {"status": "failed", "output_json_fragment": {"error": "Job timed out repeatedly on the server; please re-run this field."}})
+            else:
+                update_field_job(j["id"], {"status": "queued", "attempt_count": attempts})
+                requeued += 1
+    return requeued
+
+
+def claim_next_queued_job(batch_id: str) -> Optional[Dict[str, Any]]:
+    """Atomically claim one queued field job (queued -> running).
+
+    In serverless the status poll IS the worker; several instances may poll
+    concurrently. The conditional UPDATE .. WHERE status='queued' guarantees only
+    one instance wins each job, so we never double-pay for a generation.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    # In-memory path (local dev / single process).
+    if not supabase_client:
+        for j in list_field_jobs(batch_id):
+            if j.get("status") == "queued":
+                update_field_job(j["id"], {"status": "running", "updated_at": now})
+                return get_field_job(j["id"])
+        return None
+
+    try:
+        # Pick the oldest queued job…
+        sel = supabase_client.table("field_jobs").select("id").eq("batch_id", batch_id).eq("status", "queued").order("created_at").limit(1).execute()
+        if not sel.data:
+            return None
+        cand_id = sel.data[0]["id"]
+        # …and claim it conditionally so only one concurrent instance wins.
+        upd = supabase_client.table("field_jobs").update({"status": "running", "updated_at": now}).eq("id", cand_id).eq("status", "queued").execute()
+        if not upd.data:
+            return None  # someone else claimed it
+        row = upd.data[0]
+        _cache_field_job(row)
+        return row
+    except Exception as e:
+        print(f"Supabase claim_next_queued_job error: {e}")
+        return None
+
+
+def fail_orphan_batch(batch_id: str) -> bool:
+    """If every job is terminal but the batch itself is stuck as running, mark it done."""
+    batch = get_batch(batch_id)
+    if not batch or batch.get("status") not in {"running", "pending"}:
+        return False
+    jobs = list_field_jobs(batch_id)
+    if not jobs:
+        return False
+    terminal = {"passed", "regenerated_pass", "failed", "regenerated_fail"}
+    if all(j.get("status") in terminal for j in jobs):
+        statuses = [j.get("status") for j in jobs]
+        if all(s in {"passed", "regenerated_pass"} for s in statuses):
+            update_batch_status(batch_id, "completed")
+        elif any(s in {"passed", "regenerated_pass"} for s in statuses):
+            update_batch_status(batch_id, "partial_failure")
+        else:
+            update_batch_status(batch_id, "failed")
+        return True
+    return False

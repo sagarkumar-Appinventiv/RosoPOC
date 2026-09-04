@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import requests
 from typing import Dict, Any, List, Tuple
@@ -240,7 +241,11 @@ def generate_completion(model_id: str, prompt: str, api_key: str, system_prompt:
 
     start_time = time.time()
     try:
-        response = requests.post(f"{OPENROUTER_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=45)
+        # Serverless functions kill the request at maxDuration; keep the LLM call
+        # inside that budget so a job fails cleanly instead of being orphaned as
+        # 'running'. Local keeps a generous timeout.
+        req_timeout = float(os.environ.get("OPENROUTER_TIMEOUT_SEC", "30" if os.environ.get("VERCEL") else "45"))
+        response = requests.post(f"{OPENROUTER_BASE_URL}/chat/completions", headers=headers, json=payload, timeout=req_timeout)
         latency_ms = int((time.time() - start_time) * 1000)
 
         if response.status_code == 200:

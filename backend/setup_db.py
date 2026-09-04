@@ -172,6 +172,9 @@ CREATE TABLE IF NOT EXISTS field_jobs (
 -- 6. field_jobs: ensure updated_at exists on an existing table
 ALTER TABLE field_jobs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
+-- 6b. field_jobs: attempt_count for serverless queue retry loop protection
+ALTER TABLE field_jobs ADD COLUMN IF NOT EXISTS attempt_count INT DEFAULT 0;
+
 -- 7. verification_results: add per-field FK
 ALTER TABLE verification_results ADD COLUMN IF NOT EXISTS field_job_id UUID REFERENCES field_jobs(id) ON DELETE CASCADE;
 

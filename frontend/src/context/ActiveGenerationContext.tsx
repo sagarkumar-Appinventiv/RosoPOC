@@ -36,8 +36,9 @@ export const ActiveGenerationProvider: React.FC<{ children: React.ReactNode }> =
     setRunning(true);
 
     const tick = async (attempt: number) => {
-      if (attempt > 60) {
-        // ~2.5 min cap to avoid endless polling
+      // ~10 min cap: serverless batches process a few fields per poll, so a large
+      // FAQ batch legitimately takes longer than the old 2.5 min budget.
+      if (attempt > 240) {
         setRunning(false);
         return;
       }
@@ -51,7 +52,7 @@ export const ActiveGenerationProvider: React.FC<{ children: React.ReactNode }> =
       } catch (e) {
         console.error('poll error', e);
       }
-      pollTimer.current = setTimeout(() => tick(attempt + 1), 2500);
+      pollTimer.current = setTimeout(() => tick(attempt + 1), 3000);
     };
 
     tick(1);

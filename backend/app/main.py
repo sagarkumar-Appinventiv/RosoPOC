@@ -17,7 +17,7 @@ from app.database import (
 )
 from app.verification import verify_all_parameters, targeted_regeneration, LENGTH_WINDOW_CHARS
 from app.prompt_compiler import compile_batch_prompts
-from app.batch_engine import execute_batch
+from app.batch_engine import execute_batch, process_pending_jobs, IS_SERVERLESS
 
 app = FastAPI(title="RosoTravel AI Content Generation POC API", version="1.0.0")
 
@@ -363,8 +363,13 @@ def generate_batch_endpoint(payload: GenerateBatchRequest, token: str = Depends(
     for f in payload.fields:
         create_field_job(batch_id, f.field_key, f.system_prompt, f.user_prompt)
 
-    # Kick off async execution (returns immediately; UI polls /batch/{id}/status)
-    execute_batch(batch_id, payload.model_name, token)
+    if not IS_SERVERLESS:
+        # Kick off async execution locally (returns immediately; UI polls /batch/{id}/status)
+        execute_batch(batch_id, payload.model_name, token)
+    else:
+        # Serverless: no background thread. The status endpoint's worker tick
+        # (process_pending_jobs) drives the batch on the next poll.
+        update_batch_status(batch_id, "running")
 
     return {
         "success": True,
@@ -377,6 +382,14 @@ def generate_batch_endpoint(payload: GenerateBatchRequest, token: str = Depends(
 
 @app.get("/api/content/batch/{batch_id}/status")
 def batch_status_endpoint(batch_id: str, token: str = Depends(verify_session_token)):
+    # Serverless: this poll IS the worker — make progress on queued jobs before
+    # returning state, so no background thread needs to survive between requests.
+    if IS_SERVERLESS:
+        try:
+            process_pending_jobs(batch_id, token)
+        except Exception as e:
+            print(f"Worker tick error for batch {batch_id}: {e}")
+
     status = get_batch_status(batch_id)
     if not status:
         raise HTTPException(status_code=404, detail="Batch not found.")
@@ -410,7 +423,13 @@ def rerun_field_endpoint(batch_id: str, field_key: str, token: str = Depends(ver
     # Snapshot the original compiled prompts and re-create a single field job.
     new_job = create_field_job(batch_id, field_key, existing["compiled_system_prompt"], existing["compiled_user_prompt"])
     model_name = get_batch_status(batch_id)["batch"]["model_name"]
-    execute_batch(batch_id, model_name, token, only_field_job_id=new_job["id"])
+
+    if IS_SERVERLESS:
+        # No background thread on serverless: reset the batch so the next status
+        # poll picks up the new queued job and drives it to completion.
+        update_batch_status(batch_id, "running")
+    else:
+        execute_batch(batch_id, model_name, token, only_field_job_id=new_job["id"])
 
     return {
         "success": True,
