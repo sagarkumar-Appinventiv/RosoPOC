@@ -1,0 +1,87 @@
+{
+  "city": "Paris",
+  "country": "France",
+  "overview_data": "Paris, the iconic capital of France, is renowned worldwide for its romantic charm, extraordinary artistic heritage, classical architecture, world-class gastronomy, and vibrant cafe culture. Situated along the scenic Seine River in northern central France, the city boasts globally recognized landmarks like the Eiffel Tower, the Louvre Museum, Notre-Dame Cathedral, and the majestic Arc de Triomphe.",
+  "attractions": [
+    {
+      "name": "Eiffel Tower",
+      "category": "Landmark / Viewpoint",
+      "highlights": "Panoramic views of Paris, summit access, evening illuminations every hour, champagne bar on top.",
+      "recommended_visit_time": "2-3 hours"
+    },
+    {
+      "name": "Louvre Museum",
+      "category": "Art & Culture",
+      "highlights": "Mona Lisa, Venus de Milo, Winged Victory of Samothrace, iconic glass pyramid entrance.",
+      "recommended_visit_time": "3-4 hours"
+    },
+    {
+      "name": "Musée d'Orsay",
+      "category": "Art & History",
+      "highlights": "World's largest collection of impressionist and post-impressionist masterpieces by Monet, Van Gogh, and Degas inside a transformed Beaux-Arts railway station.",
+      "recommended_visit_time": "2-3 hours"
+    },
+    {
+      "name": "Arc de Triomphe & Champs-Élysées",
+      "category": "Monuments & Shopping",
+      "highlights": "Panoramic rooftop views looking down 12 radiating avenues, Tomb of the Unknown Soldier, luxury shopping along the Champs-Élysées.",
+      "recommended_visit_time": "1-2 hours"
+    },
+    {
+      "name": "Sainte-Chapelle",
+      "category": "Architecture & Heritage",
+      "highlights": "Breath-taking 13th-century Gothic chapel featuring 1,113 stained glass windows depicting biblical scenes.",
+      "recommended_visit_time": "1 hour"
+    },
+    {
+      "name": "Sacré-Cœur Basilica & Montmartre",
+      "category": "Historic Neighborhood",
+      "highlights": "White-domed hilltop basilica, Bohemian artist square (Place du Tertre), cobbled alleys, panoramic cityscape views.",
+      "recommended_visit_time": "3 hours"
+    }
+  ],
+  "activities": [
+    {
+      "title": "Seine River Sunset Cruise",
+      "description": "Board a glass-topped Bateau Mouche to glide past Paris' illuminated monuments while enjoying romantic acoustic music or an optional gourmet dinner."
+    },
+    {
+      "title": "French Bakery & Pastry Workshop",
+      "description": "Learn the secret techniques of baking fresh butter croissants, pain au chocolat, and colorful French macarons with a professional Parisian chef."
+    },
+    {
+      "title": "Le Marais Walking & Tasting Tour",
+      "description": "Stroll through historic aristocratic mansions, trendy fashion boutiques, falafel spots, artisanal cheese shops, and boutique wine bars."
+    },
+    {
+      "title": "Luxembourg Gardens Picnic",
+      "description": "Relax like a Parisian beside the Medici Fountain in Paris' favorite 17th-century royal park with fresh baguettes, local cheeses, and wine."
+    }
+  ],
+  "best_time_to_visit": {
+    "peak_season": "June to August (Warm weather, lively outdoor terraces, bustling crowd)",
+    "shoulder_season": "April to May & September to October (Pleasant mild climate, colorful foliage, shorter queues)",
+    "low_season": "November to February (Cooler temperatures, festive holiday lights, discounted accommodations)"
+  },
+  "travel_information": {
+    "currency": "Euro (€)",
+    "language": "French",
+    "time_zone": "Central European Time (CET, UTC+1)",
+    "public_transport": "Paris Métro, RER trains, buses, and Vélib' bike-sharing network.",
+    "airports": "Charles de Gaulle (CDG) and Orly Airport (ORY)."
+  },
+  "faqs": [
+    {
+      "question": "How many days are ideal for visiting Paris for the first time?",
+      "answer": "A stay of 4 to 5 days allows first-time visitors to see major landmarks like the Eiffel Tower, Louvre, and Montmartre without feeling rushed."
+    },
+    {
+      "question": "Is Paris easy to navigate using public transport?",
+      "answer": "Yes, the Paris Métro is one of the most efficient metro systems in the world, connecting every quarter of the city within a short walking distance."
+    },
+    {
+      "question": "Do people speak English in Paris tourist areas?",
+      "answer": "Yes, English is widely spoken in hotels, major tourist attractions, and restaurants. Starting a conversation with a polite 'Bonjour' is always appreciated."
+    }
+  ]
+}
