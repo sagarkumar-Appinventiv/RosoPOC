@@ -90,6 +90,8 @@ This is the concrete field list + default length range to seed into `field_defin
 - `faq_city` is a **repeating field** (up to 9 instances per Test Run, one per FAQ question) — model this as one `field_definitions` row with `is_repeating = true, max_instances = 9`, so the batch engine fans it out into up to 9 separate `field_jobs` rows (`faq_city[1]` … `faq_city[9]`) at execution time, each independently generated, verified, and regenerable, but all sharing the same inherited length/tone/etc. config unless a specific instance is overridden.
 - All 10 rows above should be seeded with `length_mode = range`, character unit, and the min/max shown, as their **default** — the user can still override per Test Run via the Field List Block (Section 7.2, item 3).
 
+- **Batches** — add `plan_json` column (see Section 4.7) storing the compiled batch-level Content Plan, so it's persisted alongside the batch and visible for debugging/audit, not just used transiently in memory.
+
 ---
 
 ## 4. Backend Logic Changes
@@ -107,6 +109,7 @@ This is the concrete field list + default length range to seed into `field_defin
 ### 4.3 Batch Execution Engine (NEW: `app/batch_engine.py`)
 - `POST /api/content/generate-batch` → body: `{ test_run_id, model_name, fields: [ { field_key, system_prompt, user_prompt } ] }` (the *edited* prompts from the UI, not re-compiled server-side — what the user saw is exactly what gets sent).
 - Creates one `batches` row + one `field_jobs` row per field, all `status = queued`.
+- **Before per-field execution begins, runs the Semantic Consistency Planner (Section 4.7) once for the whole batch**, storing the result as `batches.plan_json` and slicing it into each field's already-compiled prompt (append the `narrative_core` + that field's `fact_allocation` slice as a "Shared Context" block). Note: since `compile-batch` (Section 4.1) already returned prompts to the UI for user review/editing *before* the plan exists, the plan's Shared Context block is appended server-side at execution time, after the user's edits are captured — the user reviews their own per-field instructions in the popup, and the plan-derived consistency layer is added transparently on top at run time. (If it's preferred that the user also see the plan before confirming, see the open decision in Section 11.)
 - Executes field jobs **concurrently** (async, e.g. `asyncio.gather` with a concurrency cap, default 3–5 parallel calls, configurable in `app_settings`) — do not force serial execution, since fields are independent generations.
 - For each field job:
   1. Call OpenRouter with that field's compiled prompt → mark `running` → `passed`/`failed` at the LLM-call level (network/API failure vs. content failure are different states).
@@ -128,6 +131,32 @@ This is the concrete field list + default length range to seed into `field_defin
 
 ### 4.6 Fallback Mechanism
 - Unchanged in spirit (mock content on missing key / HTTP 402), but the mock must now be generated **per field** so the batch UI still shows N field cards with mock content when running in fallback/demo mode.
+
+### 4.7 Semantic Consistency Planner (NEW — fixes "fields feel disconnected")
+
+**Problem this solves:** Since each field is generated independently (and often in parallel), the resulting page can read like disconnected stitched-together pieces instead of one coherent city page — repeated facts, inconsistent tone, inconsistent naming of the same attraction, etc.
+
+**Fix: a Planning Phase runs once per batch, before any field generation starts.**
+
+1. **Planner Call:** One extra LLM call, made once per batch (not per field), given: the raw Source Data JSON, the list of included fields for this batch, and each field's resolved config (tone/audience/style if overridden). It does **not** generate any field content — it only produces a structured **Content Plan**.
+
+2. **Content Plan structure** (JSON, stored as `batches.plan_json`):
+   - `narrative_core` (small, fixed-size, ~150–250 chars): the city's overall angle/hook + a tone anchor (1–2 example phrasing lines) + naming conventions (how to refer to the city, key attractions, any nickname/spelling to standardize on).
+   - `fact_allocation`: a map of `field_key → [fact ids / short fact strings from the source data assigned to that field]`. This is how repetition is avoided — a given fact (e.g. "built in 1850", "average visit 2 hours") is assigned to exactly one field, not left for every field to independently decide to mention it.
+
+3. **CRITICAL — token budget handling (do not inject the whole plan into every field prompt):**
+   - Every field's compiled prompt (Section 4.1) includes the small, fixed-size `narrative_core` (cheap — same ~150–250 chars regardless of batch size).
+   - Every field's compiled prompt includes **only its own slice** of `fact_allocation` (i.e. `fact_allocation[this_field_key]`), never the full map for all fields.
+   - This means per-field prompt size stays roughly constant as more fields are added to a batch — the plan does not compound into a linearly-growing shared blob that gets pasted into every single field's prompt.
+   - The full `plan_json` is still persisted at the batch level for auditing/debugging (Section 3.3 addition), even though only slices of it are ever sent to any single field-generation call.
+
+4. **Compilation change:** `compile_field_prompt(input_json, field_key, resolved_field_config, plan_slice)` — `plan_slice = { narrative_core, allocated_facts: fact_allocation[field_key] }` — gets folded into the field's System Prompt as a short "Shared Context" block, alongside the existing per-field config instructions.
+
+5. **Planner failure handling:** If the Planner call fails or times out, fall back to the old behavior (no shared plan, fields generate independently) rather than blocking the whole batch — log a warning on the batch record so it's visible this batch ran "unplanned."
+
+6. **Optional (flag as a follow-up, not required for v1 of this fix) — Dependency-ordered queue:** Instead of all fields generating fully in parallel, generate a small "anchor" subset first (e.g. Title + Intro Paragraph), then pass their actual generated output (not just the plan) forward as extra context into the remaining fields' prompts. This gives even tighter coherence than the plan alone, at the cost of some added latency since those fields can no longer run at the very start of the batch. Recommend implementing the Planner (steps 1–5) first and only adding this if coherence still isn't strong enough after testing.
+
+7. **Optional (flag as a follow-up) — Final coherence check pass:** After all fields reach a terminal passed state, one more LLM call reviews all field outputs together for repeated facts, tone drift, or naming inconsistencies, and flags specific fields for a coherence-focused regeneration (separate from the existing per-field verification checks in Section 4.4, which don't look across fields at all).
 
 ---
 
@@ -206,7 +235,7 @@ Removed/deprecated: the old single-shot `POST /api/content/generate` that took o
 1. **DB migrations:** add `field_definitions`, `field_configs`, `batches`, `field_jobs`; add `field_job_id` FKs to `verification_results` and `regenerations`. Seed `field_definitions` (and default `field_configs` length ranges) with the **10-field catalogue in Section 3.4** (Meta Title, Meta Description, Snippet, Intro Paragraph, Long Description, Option Name, Option Description, Highlight Bullet, FAQ Answer, FAQ City ×9-repeating) — replacing the earlier placeholder list of 7 generic page fields.
 2. **Backend: prompt compiler refactor** — extract `compile_field_prompt`, add config resolution (inherit vs override) helper `resolve_field_config(global_default, field_override)`.
 3. **Backend: `/api/fields/schema` and `/api/content/compile-batch`** endpoints.
-4. **Backend: `batch_engine.py`** — async per-field execution, verification, targeted regeneration, all scoped per field; wire up `/api/content/generate-batch` and the status/SSE endpoint.
+4. **Backend: `batch_engine.py`** — implement the Semantic Consistency Planner (Section 4.7) as the first step of batch execution, storing `plan_json`; then async per-field execution (with the planner's narrative_core + per-field fact_allocation slice appended to each field's prompt at run time), verification, targeted regeneration, all scoped per field; wire up `/api/content/generate-batch` and the status/SSE endpoint.
 5. **Backend: single-field rerun endpoint.**
 6. **Frontend: remove Length/Tolerance from Source Data Block.**
 7. **Frontend: Field List Block** with per-field inherit/override controls, backed by `/api/fields/schema`.
@@ -250,6 +279,9 @@ Removed/deprecated: the old single-shot `POST /api/content/generate` that took o
 ---
 
 ## 11. Open Decisions for the User/Team (flag, don't assume)
+
+- **Should the user see the Planner's Content Plan before confirming the batch?** Currently spec'd as: plan runs at execution time, after the user has already reviewed/edited per-field prompts (Section 5, `generate-batch` bullet). Alternative: run the Planner earlier (during `compile-batch`) so the user can see and edit the shared `narrative_core`/`fact_allocation` too, at the cost of one extra round-trip before the popup can render. Confirm which UX is preferred.
+- **Dependency-ordered queue and final coherence check (Section 4.7, items 6–7)** — confirm whether these follow-ups are needed for v1, or only if the Planner alone doesn't produce strong enough coherence in testing.
 
 - **History/Comparison root cause** — once the coding agent reports back per Section 10.1, confirm which of the four causes it actually was, so this doesn't regress again in a future refactor.
 - **Concurrency cap** for parallel field generation calls (suggested default: 3–5) — confirm against OpenRouter rate limits for the chosen model.

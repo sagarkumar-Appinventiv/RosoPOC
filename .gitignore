@@ -9,3 +9,4 @@ frontend/dist/
 
 __pycache__/
 *.pyc.commandcode/settings.json
+.commandcode/settings.json

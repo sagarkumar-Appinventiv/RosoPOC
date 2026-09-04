@@ -517,6 +517,7 @@ def create_batch(test_run_id: str, model_name: str) -> str:
         "test_run_id": test_run_id,
         "model_name": model_name,
         "status": "pending",
+        "plan_json": None,
         "created_at": now
     }
     _in_memory_db["batches"].append(batch)
@@ -588,6 +589,17 @@ def update_batch_status(batch_id: str, status: str):
             supabase_client.table("batches").update({"status": status}).eq("id", batch_id).execute()
         except Exception as e:
             print(f"Supabase batch status update error: {e}")
+
+def update_batch_plan(batch_id: str, plan_json: Optional[Dict[str, Any]]):
+    """Stores the Semantic Consistency Planner result on the batch for audit/debugging."""
+    batch = get_batch(batch_id)
+    if batch:
+        batch["plan_json"] = plan_json
+    if supabase_client:
+        try:
+            supabase_client.table("batches").update({"plan_json": plan_json}).eq("id", batch_id).execute()
+        except Exception as e:
+            print(f"Supabase batch plan update error: {e}")
 
 def save_verification_results_scoped(field_job_id: str, verification_attempt: int, results: List[Dict[str, Any]]):
     """Saves verification results scoped to a field job (v2)."""

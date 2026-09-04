@@ -2,11 +2,12 @@ import asyncio
 import threading
 from typing import List, Optional
 from app.database import (
-    get_batch_status, update_field_job, update_batch_status,
+    get_batch_status, update_field_job, update_batch_status, update_batch_plan,
     get_verification_results_for_field, save_verification_results_scoped,
-    save_regeneration_scoped, get_field_config
+    save_regeneration_scoped, get_field_config, get_batch
 )
 from app.openrouter import generate_completion
+from app.prompt_compiler import build_planner_prompt, slice_plan_for_field
 from app.verification import verify_field, targeted_regenerate_field
 
 CONCURRENCY_CAP = 3
@@ -39,6 +40,73 @@ def _parse_field_output(field_key: str, parsed: dict):
     return parsed
 
 
+def _generate_plan(batch_id: str, model_name: str, api_key: str) -> Optional[dict]:
+    """Run the Semantic Consistency Planner once per batch.
+
+    Returns the Content Plan dict on success, None on failure (fall back to unplanned).
+    """
+    batch = get_batch(batch_id)
+    if not batch:
+        return None
+
+    from app.database import get_test_run, get_field_definitions
+
+    test_run_id = batch.get("test_run_id")
+    tr = get_test_run(test_run_id) if test_run_id else None
+    if not tr:
+        return None
+    input_json = tr.get("test_run", {}).get("input_json", {}) or {}
+
+    jobs = _in_memory_jobs(batch_id)
+    field_keys = [j["field_key"] for j in jobs]
+
+    # Build resolved configs per field for the planner prompt.
+    from app.prompt_compiler import resolve_field_config
+    global_default = tr.get("prompt_config", {}) or {}
+    global_default["language"] = (tr.get("test_run", {}) or {}).get("language", "English")
+
+    resolved_configs = {"__global__": global_default}
+    for fk in field_keys:
+        fc = get_field_config(test_run_id, fk) if test_run_id else None
+        resolved_configs[fk] = resolve_field_config(global_default, fc or {})
+
+    prompt = build_planner_prompt(input_json, field_keys, resolved_configs)
+
+    success, result_json, *_ = generate_completion(
+        model_id=model_name,
+        prompt=prompt,
+        api_key=api_key,
+        system_prompt="You are a travel content planner. Output valid JSON only."
+    )
+
+    if success and isinstance(result_json, dict) and ("narrative_core" in result_json or "fact_allocation" in result_json):
+        update_batch_plan(batch_id, result_json)
+        return result_json
+
+    # Planner failed — log a warning and continue unplanned.
+    print(f"Semantic planner failed for batch {batch_id}; running unplanned.")
+    update_batch_plan(batch_id, {"warning": "Planner failed or timed out; batch ran unplanned."})
+    return None
+
+
+def _apply_plan_to_prompt(field_key: str, plan: Optional[dict], system_prompt: str) -> str:
+    """Append the field's plan slice to the System prompt as a short Shared Context block."""
+    if not plan:
+        return system_prompt
+    plan_slice = slice_plan_for_field(plan, field_key)
+    if not plan_slice.get("narrative_core") and not plan_slice.get("allocated_facts"):
+        return system_prompt
+
+    parts = [system_prompt.rstrip(), "SHARED CONTEXT (for batch coherence):"]
+    if plan_slice.get("narrative_core"):
+        parts.append(f"NARRATIVE CORE: {plan_slice['narrative_core']}")
+    facts = plan_slice.get("allocated_facts") or []
+    if facts:
+        parts.append("FACTS ASSIGNED TO THIS FIELD ONLY (do not repeat facts assigned elsewhere):")
+        parts.extend(f"- {f}" for f in facts)
+    return "\n".join(parts) + "\n"
+
+
 def _run_one_job(batch_id: str, model_name: str, api_key: str, field_job_id: str):
     job = next((j for j in _in_memory_jobs(batch_id) if j["id"] == field_job_id), None)
     if not job:
@@ -53,6 +121,11 @@ def _run_one_job(batch_id: str, model_name: str, api_key: str, field_job_id: str
     field_cfg = get_field_config(test_run_id, field_key) if test_run_id else None
     if not field_cfg:
         field_cfg = {}
+
+    # Append the Semantic Consistency Planner's per-field slice (if a plan exists).
+    plan = (batch or {}).get("batch", {}).get("plan_json")
+    if isinstance(plan, dict):
+        system_prompt = _apply_plan_to_prompt(field_key, plan, system_prompt)
 
     if _is_aborted(batch_id):
         update_field_job(field_job_id, {"status": "failed", "output_json_fragment": {"error": "Batch aborted: API credit limit reached (402)."}})
@@ -156,6 +229,15 @@ def _compute_batch_status(batch_id: str):
 
 def _run_async(batch_id: str, model_name: str, api_key: str, only_field_job_id: Optional[str] = None):
     update_batch_status(batch_id, "running")
+
+    # Semantic Consistency Planner runs once per batch, before any field generation.
+    # For single-field rerun we skip it (the field already has its own prompt context).
+    if not only_field_job_id:
+        try:
+            _generate_plan(batch_id, model_name, api_key)
+        except Exception as e:
+            print(f"Planner exception for batch {batch_id}: {e}")
+
     if only_field_job_id:
         _run_one_job(batch_id, model_name, api_key, only_field_job_id)
     else:

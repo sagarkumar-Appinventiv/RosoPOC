@@ -59,13 +59,33 @@ export interface HistoryRun {
   fields_total?: number;
 }
 
-export interface RunDetailsPayload {
+export interface LegacyRunDetails {
   generation: any;
   test_run: any;
   prompt_config: any;
   verification_results: VerificationResult[];
   regenerations: any[];
 }
+
+export interface BatchFieldDetails {
+  field_job_id: string;
+  field_key: string;
+  status: string;
+  output: any;
+  verification_results: VerificationResult[];
+  cost: number;
+  tokens: number;
+  latency_ms: number;
+}
+
+export interface BatchRunDetails {
+  batch: any;
+  test_run: any;
+  prompt_config: any;
+  fields: BatchFieldDetails[];
+}
+
+export type RunDetailsPayload = LegacyRunDetails | BatchRunDetails;
 
 export interface AppSettings {
   verifier_model_id: string;

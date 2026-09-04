@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from app.database import get_field_definition
 
 
@@ -79,8 +79,12 @@ def resolve_field_config(global_default: Dict[str, Any], field_override: Dict[st
     return resolved
 
 
-def compile_field_prompt(input_json: Dict[str, Any], field_key: str, resolved_config: Dict[str, Any]) -> Dict[str, str]:
-    """Build System + User prompt for ONE field only, grounded in the shared source JSON."""
+def compile_field_prompt(input_json: Dict[str, Any], field_key: str, resolved_config: Dict[str, Any], plan_slice: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """Build System + User prompt for ONE field only, grounded in the shared source JSON.
+
+    If a plan_slice is provided (from the Semantic Consistency Planner), its narrative_core
+    and allocated_facts are folded into the System prompt as a short "Shared Context" block.
+    """
     fdef = get_field_definition(field_key) or {}
     label = fdef.get("label", field_key)
     instruction = FIELD_INSTRUCTIONS.get(field_key, f"content for {field_key}")
@@ -118,6 +122,19 @@ def compile_field_prompt(input_json: Dict[str, Any], field_key: str, resolved_co
         f"Do NOT write in English unless the target language is English.\n"
     )
 
+    # Append the plan-derived shared context if present (kept small — only this field's slice).
+    if plan_slice:
+        shared_parts = []
+        narrative_core = plan_slice.get("narrative_core")
+        if narrative_core:
+            shared_parts.append(f"NARRATIVE CORE (angle/hook, tone anchor, naming conventions):\n{narrative_core}")
+        allocated_facts = plan_slice.get("allocated_facts")
+        if allocated_facts:
+            facts = allocated_facts if isinstance(allocated_facts, list) else [allocated_facts]
+            shared_parts.append("FACTS ASSIGNED TO THIS FIELD ONLY (do not mention facts assigned to other fields):\n" + "\n".join(f"- {f}" for f in facts))
+        if shared_parts:
+            system_prompt += "\nSHARED CONTEXT (for batch coherence):\n" + "\n".join(shared_parts) + "\n"
+
     user_parts = [
         f"Generate {instruction} for this destination.",
         f"FACTS BRIEF (ground your content in these real names; do not invent named places):\n{facts_brief}",
@@ -153,3 +170,51 @@ def compile_batch_prompts(input_json: Dict[str, Any], field_keys: List[str], glo
         resolved = resolve_field_config(global_default, override)
         out.append(compile_field_prompt(input_json, fk, resolved))
     return out
+
+
+def build_planner_prompt(input_json: Dict[str, Any], field_keys: List[str], resolved_configs: Dict[str, Dict[str, Any]]) -> str:
+    """Build the prompt for the Semantic Consistency Planner (one call per batch, no field content)."""
+    city = input_json.get("city") or input_json.get("name") or ""
+    country = input_json.get("country") or ""
+    language = (resolved_configs.get("__global__") or {}).get("language") or "English"
+
+    field_summaries = []
+    for fk in field_keys:
+        cfg = resolved_configs.get(fk) or {}
+        length = _length_instruction(fk, cfg)
+        field_summaries.append(
+            f"- {fk}: length {length}"
+            + (f", tone {cfg['tone']}" if cfg.get("tone") else "")
+            + (f", audience {cfg['audience']}" if cfg.get("audience") else "")
+            + (f", style {cfg['style_guide']}" if cfg.get("style_guide") else "")
+        )
+
+    return (
+        "You are a content planner for RosoTravel. Produce a structured Content Plan "
+        "that keeps a multi-field city page coherent and non-repetitive.\n\n"
+        f"Destination: {city}, {country}\n"
+        f"Target language: {language}\n\n"
+        "Included fields (do NOT generate their content, only plan):\n"
+        + "\n".join(field_summaries) +
+        "\n\n"
+        "SOURCE DATA (facts available):\n"
+        f"{json.dumps(input_json, ensure_ascii=False)}\n\n"
+        "Return STRICTLY valid JSON matching exactly this schema:\n"
+        '{"narrative_core": "150-250 char string: overall angle/hook, tone anchor with 1-2 example phrasing lines, and naming conventions for city/attractions/nicknames", '
+        '"fact_allocation": {"field_key": ["short fact strings assigned ONLY to this field", "..."], ...}}\n\n'
+        "RULES:\n"
+        "- assign facts to a primary field; allow essential facts to be reused where necessary for correctness/coherence, but avoid repeating the same phrasing or selling point unnecessarily.\n"
+        "- narrative_core must be 150-250 characters.\n"
+        "- Do not wrap JSON in markdown fences.\n"
+    )
+
+
+def slice_plan_for_field(plan: Dict[str, Any], field_key: str) -> Dict[str, Any]:
+    """Extract the small per-field slice from a full Content Plan."""
+    if not plan:
+        return {}
+    fact_allocation = plan.get("fact_allocation") or {}
+    return {
+        "narrative_core": plan.get("narrative_core"),
+        "allocated_facts": fact_allocation.get(field_key) or [],
+    }

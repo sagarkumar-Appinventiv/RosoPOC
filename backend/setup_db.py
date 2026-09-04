@@ -147,8 +147,11 @@ CREATE TABLE IF NOT EXISTS batches (
     test_run_id UUID REFERENCES test_runs(id) ON DELETE CASCADE,
     model_name TEXT,
     status TEXT DEFAULT 'pending',
+    plan_json JSONB,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS plan_json JSONB;
 
 -- 5. field_jobs (created with updated_at)
 CREATE TABLE IF NOT EXISTS field_jobs (
