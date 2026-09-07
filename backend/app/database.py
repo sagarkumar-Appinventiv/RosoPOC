@@ -398,11 +398,28 @@ def get_comparison_runs(test_run_id: str) -> List[Dict[str, Any]]:
 # =====================================================================
 
 def get_field_definitions(schema_type: str = "city_page") -> List[Dict[str, Any]]:
-    """Returns the configurable field list for a schema/page type."""
-    return [
+    """Returns the configurable field list for a schema/page type.
+
+    Loads from Supabase when memory is empty (e.g. fresh serverless instance),
+    then caches locally. Falls back to the in-process seed catalogue.
+    """
+    mem = [
         f for f in _in_memory_db["field_definitions"]
         if f.get("schema_type", "city_page") == schema_type
     ]
+    if mem:
+        return mem
+
+    if supabase_client:
+        try:
+            res = supabase_client.table("field_definitions").select("*").eq("schema_type", schema_type).order("default_order").execute()
+            if res.data:
+                _in_memory_db["field_definitions"].extend(res.data)
+                return res.data
+        except Exception as e:
+            print(f"Supabase get_field_definitions error: {e}")
+
+    return mem
 
 def get_test_run(test_run_id: str) -> Optional[Dict[str, Any]]:
     """Returns a test_run + its prompt_config by test_run id (memory + Supabase fallback)."""
@@ -430,7 +447,10 @@ def get_field_definition(field_key: str) -> Optional[Dict[str, Any]]:
     return next((f for f in _in_memory_db["field_definitions"] if f["field_key"] == field_key), None)
 
 def get_or_create_field_configs(test_run_id: str, field_keys: List[str]) -> List[Dict[str, Any]]:
-    """Returns existing field_configs for the run, creating defaults from the catalogue where missing."""
+    """Returns existing field_configs for the run, creating defaults from the catalogue where missing.
+    
+    Also refreshes stale configs to match current field_definitions (fixes legacy target_tolerance configs).
+    """
     configs = [c for c in _in_memory_db["field_configs"] if c.get("test_run_id") == test_run_id]
     existing_keys = {c["field_key"] for c in configs}
 
@@ -445,6 +465,49 @@ def get_or_create_field_configs(test_run_id: str, field_keys: List[str]) -> List
                     existing_keys.add(row["field_key"])
         except Exception as e:
             print(f"Supabase get_or_create_field_configs error: {e}")
+
+    # Refresh stale configs to match current field_definitions
+    for cfg in configs:
+        fk = cfg["field_key"]
+        fdef = get_field_definition(fk)
+        if not fdef:
+            continue
+        
+        expected_mode = fdef.get("length_mode", "range")
+        expected_min = fdef.get("length_min")
+        expected_max = fdef.get("length_max")
+        expected_unit = fdef.get("unit", "characters")
+        
+        # Check if config is stale (mode or bounds don't match field_definition)
+        is_stale = (
+            cfg.get("length_mode") != expected_mode or
+            cfg.get("length_min") != expected_min or
+            cfg.get("length_max") != expected_max or
+            cfg.get("unit") != expected_unit
+        )
+        
+        if is_stale:
+            # Update in-memory config
+            cfg["length_mode"] = expected_mode
+            cfg["length_min"] = expected_min
+            cfg["length_max"] = expected_max
+            cfg["length_target"] = None
+            cfg["length_tolerance_pct"] = None
+            cfg["unit"] = expected_unit
+            
+            # Persist to Supabase
+            if supabase_client:
+                try:
+                    supabase_client.table("field_configs").update({
+                        "length_mode": expected_mode,
+                        "length_min": expected_min,
+                        "length_max": expected_max,
+                        "length_target": None,
+                        "length_tolerance_pct": None,
+                        "unit": expected_unit
+                    }).eq("test_run_id", test_run_id).eq("field_key", fk).execute()
+                except Exception as e:
+                    print(f"Supabase field_config refresh error for {fk}: {e}")
 
     for fk in field_keys:
         if fk in existing_keys:
@@ -476,6 +539,11 @@ def get_or_create_field_configs(test_run_id: str, field_keys: List[str]) -> List
         _in_memory_db["field_configs"].append(cfg)
         configs.append(cfg)
         existing_keys.add(fk)
+        if supabase_client:
+            try:
+                supabase_client.table("field_configs").insert(cfg).execute()
+            except Exception as e:
+                print(f"Supabase field_config insert error: {e}")
 
     return configs
 
@@ -654,7 +722,27 @@ def get_field_job(field_job_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 def get_field_job_in_batch(batch_id: str, field_key: str) -> Optional[Dict[str, Any]]:
-    return next((j for j in list_field_jobs(batch_id) if j["field_key"] == field_key), None)
+    """Returns the LATEST field job for a key (reruns create multiple jobs)."""
+    jobs = [j for j in list_field_jobs(batch_id) if j["field_key"] == field_key]
+    if not jobs:
+        return None
+    jobs.sort(key=lambda j: j.get("created_at") or "")
+    return jobs[-1]
+
+def get_latest_field_jobs(batch_id: str) -> List[Dict[str, Any]]:
+    """Returns one LATEST job per field_key for a batch.
+
+    Reruns create multiple jobs for the same field; the UI should show only the
+    latest version per field, not a new card every time a field is regenerated.
+    """
+    jobs = list_field_jobs(batch_id)
+    latest = {}
+    for j in jobs:
+        key = j.get("field_key")
+        if key not in latest or (j.get("created_at") or "") > (latest[key].get("created_at") or ""):
+            latest[key] = j
+    # Preserve the original field order as much as possible (catalogue order).
+    return sorted(latest.values(), key=lambda j: (j.get("created_at") or ""))
 
 def update_batch_status(batch_id: str, status: str):
     batch = get_batch(batch_id)
@@ -702,19 +790,28 @@ def save_verification_results_scoped(field_job_id: str, verification_attempt: in
             print(f"Supabase scoped verification insert error: {e}")
 
 def get_verification_results_for_field(field_job_id: str) -> List[Dict[str, Any]]:
+    """Returns ONLY the latest verification attempt's results for a field job.
+
+    Initial verify (attempt 1) and regeneration verify (attempt 2+) both save
+    results for the same job. The UI should show only the latest verdict, not
+    every historical attempt stacked on top of each other.
+    """
     mem = [v for v in _in_memory_db["verification_results"] if v.get("field_job_id") == field_job_id]
-    if mem or not supabase_client:
+
+    if not mem and supabase_client:
+        try:
+            res = supabase_client.table("verification_results").select("*").eq("field_job_id", field_job_id).order("created_at").execute()
+            for row in res.data or []:
+                _in_memory_db["verification_results"].append(row)
+            mem = [row for row in (res.data or [])]
+        except Exception as e:
+            print(f"Supabase get_verification_results_for_field error: {e}")
+
+    if not mem:
         return mem
-    try:
-        res = supabase_client.table("verification_results").select("*").eq("field_job_id", field_job_id).order("created_at").execute()
-        out = []
-        for row in res.data or []:
-            _in_memory_db["verification_results"].append(row)
-            out.append(row)
-        return out
-    except Exception as e:
-        print(f"Supabase get_verification_results_for_field error: {e}")
-        return mem
+
+    latest_attempt = max(v.get("verification_attempt", 1) for v in mem)
+    return [v for v in mem if v.get("verification_attempt", 1) == latest_attempt]
 
 def save_regeneration_scoped(field_job_id: str, parameter: str, previous_output: Any, new_output: Any, reason: str):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()

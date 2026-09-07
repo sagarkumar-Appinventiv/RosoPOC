@@ -13,11 +13,12 @@ from app.database import (
     get_history_runs, get_run_details, get_comparison_runs, get_used_models_for_test_run,
     get_field_definitions, get_or_create_field_configs, create_batch, create_field_job,
     get_batch_status, get_field_job, get_field_job_in_batch, update_field_job, update_batch_status,
-    get_verification_results_for_field, get_test_run, get_batch, get_batch_field_jobs, get_comparison_batches
+    get_verification_results_for_field, get_test_run, get_batch, get_batch_field_jobs, get_comparison_batches,
+    get_latest_field_jobs
 )
-from app.verification import verify_all_parameters, targeted_regeneration, LENGTH_WINDOW_CHARS
+from app.verification import verify_all_parameters, targeted_regeneration
 from app.prompt_compiler import compile_batch_prompts
-from app.batch_engine import execute_batch, process_pending_jobs, IS_SERVERLESS
+from app.batch_engine import execute_batch, process_pending_jobs, IS_SERVERLESS, _targeted_regenerate, _field_config_for_job
 
 app = FastAPI(title="RosoTravel AI Content Generation POC API", version="1.0.0")
 
@@ -251,13 +252,17 @@ def generate_content_endpoint(payload: ContentGenerateRequest, token: str = Depe
     target_lang = payload.language or "English"
     target_len = payload.content_length or 200
 
+    tolerance_pct = 50.0
+    min_allowed = int(target_len * (1 - tolerance_pct / 100))
+    max_allowed = int(target_len * (1 + tolerance_pct / 100))
+
     # Explicit Multilingual & Character Length System Prompt Mandate
     system_prompt = f"""You are a professional travel content writer for RosoTravel.
 CRITICAL LANGUAGE MANDATE:
 Write ALL text string values in the JSON output strictly in {target_lang}. (If language is Hindi, use Hindi Devanagari script).
 
 CRITICAL CHARACTER LENGTH MANDATE:
-Provide detailed descriptions so the overall total character count is between {target_len - LENGTH_WINDOW_CHARS} and {target_len + LENGTH_WINDOW_CHARS} characters.
+Provide detailed descriptions so the overall total character count is between {min_allowed} and {max_allowed} characters (target ~{target_len} characters).
 
 Output valid JSON only matching keys: title, introduction, attractions, activities, best_time_to_visit, travel_tips, faqs."""
 
@@ -267,7 +272,7 @@ Output valid JSON only matching keys: title, introduction, attractions, activiti
             f"Create travel guide content for {payload.city}, {payload.country} using the provided JSON data:",
             json.dumps(payload.input_json, indent=2),
             f"CRITICAL LANGUAGE MANDATE:\nYou MUST write and translate ALL output text strictly into {target_lang}. Do NOT write in English.",
-            f"TARGET CHARACTER LENGTH: Provide rich details so the overall total character count is between {target_len - LENGTH_WINDOW_CHARS} and {target_len + LENGTH_WINDOW_CHARS} characters."
+            f"TARGET CHARACTER LENGTH: Provide rich details so the overall total character count is between {min_allowed} and {max_allowed} characters (target ~{target_len} characters)."
         ]
         if payload.tone:
             prompt_parts.append(f"Tone: {payload.tone}")
@@ -394,8 +399,10 @@ def batch_status_endpoint(batch_id: str, token: str = Depends(verify_session_tok
     if not status:
         raise HTTPException(status_code=404, detail="Batch not found.")
 
+    # Show ONE latest card per field_key (regenerations create new jobs; the UI
+    # should not keep adding duplicate cards).
     fields_out = []
-    for job in status["fields"]:
+    for job in get_latest_field_jobs(batch_id):
         fields_out.append({
             "field_job_id": job["id"],
             "field_key": job["field_key"],
@@ -437,6 +444,70 @@ def rerun_field_endpoint(batch_id: str, field_key: str, token: str = Depends(ver
         "batch_id": batch_id,
         "field_key": field_key,
         "message": "Field re-run started."
+    }
+
+@app.post("/api/content/batch/{batch_id}/field/{field_key}/regenerate")
+def regenerate_field_endpoint(batch_id: str, field_key: str, token: str = Depends(verify_session_token)):
+    """User-triggered TARGETED regeneration of one failed field.
+
+    Reuses the field's existing output (not a fresh prompt/generation) and sends
+    the model only the failed verification checks. Cheaper than a full rerun.
+    """
+    existing = get_field_job_in_batch(batch_id, field_key)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Field job not found in this batch.")
+
+    model_name = get_batch_status(batch_id)["batch"]["model_name"]
+    current_fragment = existing.get("output_json_fragment")
+    if current_fragment is None:
+        raise HTTPException(status_code=400, detail="Field has no output to regenerate yet.")
+
+    field_cfg = _field_config_for_job(existing)
+
+    # Dynamically advance the attempt number so repeated regenerations produce a
+    # clean, monotonic history and the UI always shows the latest verdict.
+    existing_results = get_verification_results_for_field(existing["id"])
+    next_attempt = (max(v.get("verification_attempt", 1) for v in existing_results) + 1) if existing_results else 2
+
+    if IS_SERVERLESS:
+        # No background thread: run the targeted regeneration synchronously in
+        # this request. It is one LLM call, so it stays within the function budget
+        # with the same timeout guard as the batch worker.
+        _targeted_regenerate(
+            field_job_id=existing["id"],
+            model_name=model_name,
+            field_key=field_key,
+            current_fragment=current_fragment,
+            field_cfg=field_cfg,
+            api_key=token,
+            attempt=next_attempt
+        )
+        # Settle the batch flag after in-place update.
+        from app.batch_engine import _compute_batch_status
+        update_batch_status(batch_id, _compute_batch_status(batch_id))
+    else:
+        # Local: run in a background thread, same as full rerun.
+        import threading
+        def _run():
+            _targeted_regenerate(
+                field_job_id=existing["id"],
+                model_name=model_name,
+                field_key=field_key,
+                current_fragment=current_fragment,
+                field_cfg=field_cfg,
+                api_key=token,
+                attempt=next_attempt
+            )
+            from app.batch_engine import _compute_batch_status
+            update_batch_status(batch_id, _compute_batch_status(batch_id))
+        threading.Thread(target=_run, daemon=True).start()
+
+    return {
+        "success": True,
+        "field_job_id": existing["id"],
+        "batch_id": batch_id,
+        "field_key": field_key,
+        "message": "Targeted field regeneration started."
     }
 
 @app.post("/api/content/verify")

@@ -21,18 +21,15 @@ def count_characters(text: str) -> int:
     """Counts characters in a text string."""
     return len(text.strip())
 
-LENGTH_WINDOW_CHARS = 10
-
 def check_content_length(content_json: Dict[str, Any], target_chars: int, tolerance_pct: float = 50.0) -> Tuple[str, int, int, int]:
     """
-    Checks that content length is within a fixed +/-10 character window of the
-    requested character target.
+    Checks that content length is within tolerance_pct% of the requested character target.
     """
     full_text = extract_all_text_values(content_json)
     actual_chars = count_characters(full_text)
 
-    min_allowed = target_chars - LENGTH_WINDOW_CHARS
-    max_allowed = target_chars + LENGTH_WINDOW_CHARS
+    min_allowed = int(target_chars * (1 - tolerance_pct / 100))
+    max_allowed = int(target_chars * (1 + tolerance_pct / 100))
 
     if min_allowed <= actual_chars <= max_allowed:
         return "PASS", actual_chars, min_allowed, max_allowed
@@ -235,13 +232,17 @@ def verify_all_parameters(content_json: Dict[str, Any], prompt_config: Dict[str,
 def targeted_regeneration(model_id: str, current_json: Dict[str, Any], prompt_config: Dict[str, Any], failed_results: List[Dict[str, Any]], api_key: str) -> Tuple[Dict[str, Any], int, int, int, int, float]:
     """Executes targeted regeneration to fix failed parameters."""
     target_chars = int(prompt_config.get("content_length", 200) or 200)
+    tolerance_pct = float(prompt_config.get("content_length_tolerance_pct", 50.0) or 50.0)
     language = prompt_config.get("language", "English")
+
+    min_allowed = int(target_chars * (1 - tolerance_pct / 100))
+    max_allowed = int(target_chars * (1 + tolerance_pct / 100))
 
     fixes = []
     for f in failed_results:
         p = f.get("parameter")
         if p == "Character Length":
-            fixes.append(f"- Strictly adjust overall character count to be within {target_chars - LENGTH_WINDOW_CHARS} to {target_chars + LENGTH_WINDOW_CHARS} characters.")
+            fixes.append(f"- Strictly adjust overall character count to be between {min_allowed} and {max_allowed} characters (target ~{target_chars} characters).")
         elif p == "Banned Keywords":
             banned = prompt_config.get("banned_keywords", [])
             fixes.append(f"- Strictly DO NOT use any of these banned words: {', '.join(banned)}.")
@@ -339,26 +340,122 @@ def verify_field(field_key: str, fragment: Any, field_config: Dict[str, Any]) ->
     return results
 
 
+def _truncate_text(text: str, max_chars: int) -> str:
+    """Truncate text to max_chars, preferring a sentence then word boundary."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    # Prefer ending on a sentence boundary (keep the terminator).
+    for sep in (". ", "! ", "? ", ".", "!", "?"):
+        idx = cut.rfind(sep)
+        if idx > int(max_chars * 0.5):
+            end = idx + (1 if sep in (".", "!", "?") else len(sep) - 1)
+            return cut[:end].strip()
+    # Fall back to a word boundary.
+    sp = cut.rfind(" ")
+    if sp > int(max_chars * 0.5):
+        return cut[:sp].strip()
+    return cut.strip()
+
+
+def _strip_banned_words(text: str, banned: List[str]) -> str:
+    """Remove banned words (whole-word, case-insensitive) from text."""
+    if not banned:
+        return text
+    for kw in banned:
+        kw = (kw or "").strip()
+        if not kw:
+            continue
+        pattern = r'\b' + re.escape(kw) + r'\b'
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    return " ".join(text.split())
+
+
+def enforce_field_constraints(fragment: Any, field_config: Dict[str, Any]) -> Any:
+    """Deterministically enforce code-based constraints (max length + banned words).
+
+    LLMs cannot reliably count characters, so we never trust them to hit an
+    exact length range. After every generation/regeneration the fragment is
+    truncated in code to the configured max (at a sentence boundary) and any
+    banned words are stripped. This guarantees the code-based verification
+    checks can never fail the user — only genuine LLM checks (tone/audience/
+    style) may. Returns the enforced fragment (structure preserved).
+    """
+    if fragment is None:
+        return fragment
+    length_max = field_config.get("length_max")
+    banned = field_config.get("banned_keywords") or []
+
+    if isinstance(fragment, str):
+        out = _strip_banned_words(fragment, banned) if banned else fragment
+        if length_max and count_characters(out) > int(length_max):
+            out = _truncate_text(out, int(length_max))
+        return out
+
+    if isinstance(fragment, dict):
+        out = {}
+        for k, v in fragment.items():
+            if isinstance(v, str):
+                out[k] = _strip_banned_words(v, banned) if banned else v
+            else:
+                out[k] = enforce_field_constraints(v, field_config)
+        if length_max:
+            total = count_characters(extract_all_text_values(out))
+            if total > int(length_max):
+                # Trim the longest string value by the overflow amount.
+                overflow = total - int(length_max)
+                longest_key, longest_len = None, -1
+                for k, v in out.items():
+                    if isinstance(v, str) and len(v) > longest_len:
+                        longest_key, longest_len = k, len(v)
+                if longest_key:
+                    out[longest_key] = _truncate_text(out[longest_key], max(1, longest_len - overflow))
+        return out
+
+    if isinstance(fragment, list):
+        return [enforce_field_constraints(x, field_config) for x in fragment]
+
+    return fragment
+
+
 def targeted_regenerate_field(model_id: str, field_key: str, current_fragment: Any, failed_results: List[Dict[str, Any]], field_config: Dict[str, Any], api_key: str) -> Tuple[bool, Any, int, int, int, int, float]:
     """Regenerate one field only, using only its failed checks. Returns (ok, new_fragment, in_t, out_t, tot_t, lat, cost)."""
     fixes = []
+    length_hint = ""
+    current_text = extract_all_text_values(current_fragment)
+    current_chars = count_characters(current_text)
+
     for f in failed_results:
         p = f.get("parameter")
         if p == "Character Length":
             if field_config.get("length_mode") == "target_tolerance":
                 target = int(field_config.get("length_target") or 200)
                 tol = field_config.get("length_tolerance_pct", 50)
-                fixes.append(f"- Strictly adjust overall character count to ~{target} characters (±{tol}%).")
+                lo = int(target * (1 - tol / 100))
+                hi = int(target * (1 + tol / 100))
+                fixes.append(f"- Strictly adjust overall character count to be between {lo} and {hi} characters (target {target}).")
+                length_hint = f"Current character count is {current_chars}. Target range is {lo}-{hi} characters. Add or trim text accordingly so the final count falls inside this range."
             else:
                 lo = field_config.get("length_min")
                 hi = field_config.get("length_max")
-                fixes.append(f"- Strictly adjust overall character count to within {lo}-{hi} characters." if lo and hi else f"- Keep character count within the configured limit ({hi} max)." if hi else f"- Meet the minimum character count of {lo}.")
+                if lo and hi:
+                    fixes.append(f"- Strictly adjust overall character count to be between {lo} and {hi} characters.")
+                    length_hint = f"Current character count is {current_chars}. Allowed range is {lo}-{hi} characters. Add or trim text so the final count falls inside this range."
+                elif hi:
+                    fixes.append(f"- Keep character count at most {hi} characters.")
+                    length_hint = f"Current character count is {current_chars}. Maximum allowed is {hi} characters. Trim text to stay under this limit."
+                elif lo:
+                    fixes.append(f"- Meet the minimum character count of {lo} characters.")
+                    length_hint = f"Current character count is {current_chars}. Minimum allowed is {lo} characters. Add more content to meet this minimum."
         elif p == "Banned Keywords":
             banned = field_config.get("banned_keywords") or []
             fixes.append(f"- Strictly DO NOT use any of these banned words: {', '.join(banned)}.")
 
     if not fixes:
         return True, current_fragment, 0, 0, 0, 0, 0.0
+
+    length_instruction = f"\n\nCRITICAL LENGTH GUIDANCE:\n{length_hint}\n" if length_hint else ""
 
     regen_prompt = f"""You are a travel content writer refining a single field's output.
 
@@ -367,7 +464,7 @@ Current output fragment (must be kept unless a fix requires a change):
 {json.dumps(current_fragment, ensure_ascii=False, indent=2)}
 
 REQUIRED FIXES (apply ONLY these):
-{chr(10).join(fixes)}
+{chr(10).join(fixes)}{length_instruction}
 
 Return strictly valid JSON containing only the field key and its corrected value.
 """

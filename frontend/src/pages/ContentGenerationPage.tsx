@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  fetchModels, getOrCreateTestRun, fetchFieldSchema, compileBatch, generateBatch, rerunField
+  fetchModels, getOrCreateTestRun, fetchFieldSchema, compileBatch, generateBatch, regenerateField
 } from '../services/api';
 import type { ModelInfo, FieldDefinition, CompiledFieldPrompt } from '../types';
 import { useActiveGeneration } from '../context/ActiveGenerationContext';
@@ -118,13 +118,13 @@ export const ContentGenerationPage: React.FC = () => {
     }
   };
 
-  const handleRerunField = async (fieldKey: string) => {
+  const handleRegenerateField = async (fieldKey: string) => {
     if (!batchStatus) return;
     try {
-      await rerunField(batchStatus.batch_id, fieldKey);
+      await regenerateField(batchStatus.batch_id, fieldKey);
       startPolling(batchStatus.batch_id);
     } catch (e: any) {
-      alert(e.message || 'Failed to re-run field.');
+      alert(e.message || 'Failed to regenerate field.');
     }
   };
 
@@ -316,8 +316,8 @@ export const ContentGenerationPage: React.FC = () => {
                   </div>
                 )}
                 {terminalFail(f.status) && (
-                  <button className="btn-secondary" style={{ marginTop: '10px', width: '100%', padding: '6px', fontSize: '12px' }} onClick={() => handleRerunField(f.field_key)}>
-                    <RefreshCw size={12} /> Rerun this field
+                  <button className="btn-primary" style={{ marginTop: '10px', width: '100%', padding: '6px', fontSize: '12px' }} onClick={() => handleRegenerateField(f.field_key)}>
+                    <RefreshCw size={12} /> Regenerate (targeted fix)
                   </button>
                 )}
               </div>

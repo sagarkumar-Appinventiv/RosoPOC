@@ -194,3 +194,15 @@ export async function rerunField(batchId: string, fieldKey: string) {
   }
   return res.json();
 }
+
+export async function regenerateField(batchId: string, fieldKey: string) {
+  const res = await fetch(`${API_BASE_URL}/content/batch/${batchId}/field/${fieldKey}/regenerate`, {
+    method: 'POST',
+    headers: getAuthHeader()
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || 'Failed to regenerate field');
+  }
+  return res.json();
+}

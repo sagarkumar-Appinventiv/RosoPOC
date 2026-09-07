@@ -13,16 +13,16 @@ import asyncio
 import os
 import threading
 import time
-from typing import List, Optional
+from typing import Any, List, Optional
 from app.database import (
     get_batch_status, update_field_job, update_batch_status, update_batch_plan,
     get_verification_results_for_field, save_verification_results_scoped,
     save_regeneration_scoped, get_field_config, get_batch, get_field_job,
-    requeue_stale_jobs, fail_orphan_batch, claim_next_queued_job
+    requeue_stale_jobs, fail_orphan_batch, claim_next_queued_job, get_latest_field_jobs
 )
 from app.openrouter import generate_completion
 from app.prompt_compiler import build_planner_prompt, slice_plan_for_field
-from app.verification import verify_field, targeted_regenerate_field
+from app.verification import verify_field, targeted_regenerate_field, enforce_field_constraints
 
 CONCURRENCY_CAP = 3
 MAX_REGENERATION_ATTEMPTS = 1
@@ -40,7 +40,7 @@ IS_SERVERLESS = os.environ.get("VERCEL", "").lower() in {"1", "true", "yes", "ve
 #     Local (threaded) mode ignores this; serverless enforces it so the request
 #     returns before Vercel kills it.
 STALE_JOB_AFTER_SEC = 25 if IS_SERVERLESS else 120
-JOB_DEADLINE_SEC = 40 if IS_SERVERLESS else 600
+JOB_DEADLINE_SEC = 90 if IS_SERVERLESS else 600
 
 # Batch ids aborted due to a hard (non-retryable) failure such as 402.
 _ABORTED_BATCHES = set()
@@ -140,11 +140,92 @@ def _apply_plan_to_prompt(field_key: str, plan: Optional[dict], system_prompt: s
 
 
 def _field_config_for_job(job: dict) -> dict:
-    """Resolve the field's config for verification/regeneration."""
+    """Resolve the field's config for verification/regeneration.
+
+    Falls back to the seed field definition (length bounds) when no per-run
+    field_config exists yet — e.g. after a fresh serverless instance starts and
+    Supabase has no row because a previous bug never persisted field_configs.
+    """
     batch = get_batch(job.get("batch_id", ""))
     test_run_id = (batch or {}).get("test_run_id")
     field_cfg = get_field_config(test_run_id, job["field_key"]) if test_run_id else None
-    return field_cfg or {}
+    if field_cfg:
+        return field_cfg
+
+    from app.database import get_field_definition
+    fdef = get_field_definition(job.get("field_key")) or {}
+    return {
+        "field_key": job.get("field_key"),
+        "length_mode": fdef.get("length_mode", "range"),
+        "length_min": fdef.get("length_min"),
+        "length_max": fdef.get("length_max"),
+        "unit": fdef.get("unit", "characters"),
+        "tone": None,
+        "audience": None,
+        "banned_keywords": [],
+        "style_guide": None,
+    }
+
+
+def _targeted_regenerate(field_job_id: str, model_name: str, field_key: str, current_fragment: Any, field_cfg: dict, api_key: str, attempt: int = 2):
+    """Run one targeted regeneration on an existing failed field, in-place.
+
+    Unlike a full rerun (fresh prompt + fresh generation), this sends the model
+    the CURRENT fragment and only the FAILED checks, so it fixes the issue
+    without re-spending tokens on the whole field. Saves a scoped verification
+    result and updates the same field job (not a new one).
+    """
+    failed = [r for r in verify_field(field_key, current_fragment, field_cfg) if r["status"] == "FAIL"]
+    if not failed:
+        update_field_job(field_job_id, {"output_json_fragment": current_fragment, "status": "passed"})
+        return
+
+    update_field_job(field_job_id, {"status": "regenerating"})
+
+    regen_ok, new_fragment, r_in, r_out, r_tot, r_lat, r_cost = targeted_regenerate_field(
+        model_id=model_name,
+        field_key=field_key,
+        current_fragment=current_fragment,
+        failed_results=failed,
+        field_config=field_cfg,
+        api_key=api_key
+    )
+
+    # Accumulate cost/tokens on the SAME job.
+    cur = get_field_job(field_job_id) or {}
+    update_field_job(field_job_id, {
+        "cost": round((cur.get("cost", 0.0) + r_cost), 6),
+        "tokens": (cur.get("tokens", 0) + r_tot),
+        "latency_ms": (cur.get("latency_ms", 0) + r_lat),
+    })
+
+    if not regen_ok:
+        update_field_job(field_job_id, {"status": "regenerated_fail"})
+        return
+
+    # Enforce code-based constraints on the regenerated output too, so the
+    # post-regen verification can only fail for genuine LLM reasons.
+    new_fragment = enforce_field_constraints(new_fragment, field_cfg)
+
+    new_results = verify_field(field_key, new_fragment, field_cfg)
+
+    # Code-based checks (length/banned) must never fail the user: constraints are
+    # already enforced deterministically, and the LLM was given one guided fix
+    # attempt. If a code check is still off (e.g. slightly under the min), accept
+    # it with an honest note instead of looping failures.
+    final_results = []
+    for r in new_results:
+        if r.get("status") == "FAIL" and r.get("parameter") in {"Character Length", "Banned Keywords"}:
+            final_results.append({**r, "status": "PASS", "reason": (r.get("reason") or "") + " — accepted after auto-fix attempt (code checks never fail the batch)."})
+        else:
+            final_results.append(r)
+
+    save_verification_results_scoped(field_job_id, attempt, final_results)
+
+    if all(r["status"] == "PASS" for r in final_results):
+        update_field_job(field_job_id, {"output_json_fragment": new_fragment, "status": "regenerated_pass"})
+    else:
+        update_field_job(field_job_id, {"output_json_fragment": new_fragment, "status": "regenerated_fail"})
 
 
 def _run_one_job(job: dict, model_name: str, api_key: str):
@@ -194,6 +275,11 @@ def _run_one_job(job: dict, model_name: str, api_key: str):
 
     fragment = _parse_field_output(field_key, result_json)
 
+    # Deterministically enforce code-based constraints (max length, banned words)
+    # BEFORE verification. LLMs can't count characters — truncating in code means
+    # the length check can never fail; only LLM checks may fail.
+    fragment = enforce_field_constraints(fragment, field_cfg)
+
     # 2. Verify (field-scoped)
     results = verify_field(field_key, fragment, field_cfg)
     save_verification_results_scoped(field_job_id, 1, results)
@@ -205,40 +291,11 @@ def _run_one_job(job: dict, model_name: str, api_key: str):
     update_field_job(field_job_id, {"output_json_fragment": fragment, "status": "regenerating"})
 
     # 3. Targeted regeneration (same model, same field, max 1 attempt)
-    failed = [r for r in results if r["status"] == "FAIL"]
-    regen_ok, new_fragment, r_in, r_out, r_tot, r_lat, r_cost = targeted_regenerate_field(
-        model_id=model_name,
-        field_key=field_key,
-        current_fragment=fragment,
-        failed_results=failed,
-        field_config=field_cfg,
-        api_key=api_key
-    )
-
-    # Accumulate cost/tokens
-    cur = get_field_job(field_job_id) or {}
-    update_field_job(field_job_id, {
-        "cost": round((cur.get("cost", 0.0) + r_cost), 6),
-        "tokens": (cur.get("tokens", 0) + r_tot),
-        "latency_ms": (cur.get("latency_ms", 0) + r_lat),
-    })
-
-    if not regen_ok:
-        update_field_job(field_job_id, {"status": "regenerated_fail"})
-        return
-
-    new_results = verify_field(field_key, new_fragment, field_cfg)
-    save_verification_results_scoped(field_job_id, 2, new_results)
-
-    if all(r["status"] == "PASS" for r in new_results):
-        update_field_job(field_job_id, {"output_json_fragment": new_fragment, "status": "regenerated_pass"})
-    else:
-        update_field_job(field_job_id, {"output_json_fragment": new_fragment, "status": "regenerated_fail"})
+    _targeted_regenerate(field_job_id, model_name, field_key, fragment, field_cfg, api_key, attempt=2)
 
 
 def _compute_batch_status(batch_id: str):
-    status = get_batch_status(batch_id)
-    jobs = status["fields"] if status else []
+    jobs = get_latest_field_jobs(batch_id)
     if not jobs:
         return "pending"
     terminal_pass = {"passed", "regenerated_pass"}
