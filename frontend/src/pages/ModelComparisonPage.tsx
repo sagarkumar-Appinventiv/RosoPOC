@@ -135,26 +135,19 @@ export const ModelComparisonPage: React.FC = () => {
                       {fieldKeys.length === 0 && (
                         <div style={{ color: '#64748B', fontSize: '12px' }}>No fields available for this run.</div>
                       )}
-                      {fieldKeys.map((fk: string) => {
-                        const field = (r.fields || []).find((f: any) => f.field_key === fk);
-                        return (
-                          <div key={fk} style={{ borderBottom: '1px solid #F1F5F9', paddingBottom: '12px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
-                              <span style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.03em', color: '#64748B' }}>{fk}</span>
-                              {field?.verification_results?.length > 0 && (
-                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', justifyContent: 'flex-end' }}>
-                                  {field.verification_results.map((v: any, j: number) => (
-                                    <span key={j} className={`badge badge-${v.status === 'PASS' ? 'verified' : 'failed'}`} style={{ fontSize: '9px' }}>{v.parameter}: {v.status}</span>
-                                  ))}
+{fieldKeys.map((fk: string) => {
+                            const field = (r.fields || []).find((f: any) => f.field_key === fk);
+                            return (
+                              <div key={fk} style={{ borderBottom: '1px solid #F1F5F9', paddingBottom: '12px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                                  <span style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.03em', color: '#64748B' }}>{fk}</span>
                                 </div>
-                              )}
-                            </div>
-                            <div style={{ fontSize: '12px', color: '#334155', lineHeight: '1.5', whiteSpace: 'pre-wrap' }}>
-                              {renderValue(field?.output)}
-                            </div>
-                          </div>
-                        );
-                      })}
+                                <div style={{ fontSize: '12px', color: '#334155', lineHeight: '1.5', whiteSpace: 'pre-wrap' }}>
+                                  {renderValue(field?.output)}
+                                </div>
+                              </div>
+                            );
+                          })}
                     </div>
                   </div>
                 );
