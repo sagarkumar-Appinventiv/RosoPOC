@@ -7,18 +7,28 @@ export const DashboardPage: React.FC<{ onNavigateToHistory?: () => void }> = ({ 
   const [stats, setStats] = useState<any>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('All');
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchDashboardStats()
-      .then((data) => setStats(data))
-      .catch((e) => console.error(e));
+      .then((data) => {
+        setStats(data);
+        setError(null);
+      })
+      .catch((e) => {
+        console.error('Dashboard stats error:', e);
+        setError('Failed to load dashboard metrics');
+        setStats(null);
+      });
   }, []);
 
   const runsList = stats?.recent_runs || [];
 
+  const normalizeStatus = (s: string) => (s || '').toLowerCase().replace(/_/g, ' ');
+
   const filteredRuns = statusFilter === 'All'
     ? runsList
-    : runsList.filter((r: any) => (r.status || '').toLowerCase() === statusFilter.toLowerCase());
+    : runsList.filter((r: any) => normalizeStatus(r.status) === normalizeStatus(statusFilter));
 
   return (
     <div className="workspace-container">
@@ -33,6 +43,12 @@ export const DashboardPage: React.FC<{ onNavigateToHistory?: () => void }> = ({ 
           <span style={{ fontWeight: 600 }}>Live Session</span>
         </div>
       </div>
+
+      {error && (
+        <div style={{ marginBottom: '16px', padding: '12px 16px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '8px', color: '#B91C1C', fontSize: '13px', fontWeight: 500 }}>
+          {error}
+        </div>
+      )}
 
       {/* 6 KPI Metric Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px', marginBottom: '28px' }}>
@@ -112,7 +128,7 @@ export const DashboardPage: React.FC<{ onNavigateToHistory?: () => void }> = ({ 
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             <div style={{ display: 'flex', gap: '4px', backgroundColor: '#F1F5F9', padding: '3px', borderRadius: '8px' }}>
-              {['All', 'Verified', 'Regenerated', 'Failed'].map((st) => (
+              {['All', 'Verified', 'Regenerated', 'Partial Failure', 'Failed'].map((st) => (
                 <button
                   key={st}
                   onClick={() => setStatusFilter(st)}

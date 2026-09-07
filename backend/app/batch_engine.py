@@ -18,7 +18,8 @@ from app.database import (
     get_batch_status, update_field_job, update_batch_status, update_batch_plan,
     get_verification_results_for_field, save_verification_results_scoped,
     save_regeneration_scoped, get_field_config, get_batch, get_field_job,
-    requeue_stale_jobs, fail_orphan_batch, claim_next_queued_job, get_latest_field_jobs
+    requeue_stale_jobs, fail_orphan_batch, claim_next_queued_job, get_latest_field_jobs,
+    update_batch_progress
 )
 from app.openrouter import generate_completion
 from app.prompt_compiler import build_planner_prompt, slice_plan_for_field
@@ -331,6 +332,7 @@ def process_pending_jobs(batch_id: str, api_key: str, max_jobs: int = JOBS_PER_T
         return {"processed": 0, "batch_status": "not_found"}
     batch = status["batch"]
     if batch.get("status") in {"completed", "failed", "partial_failure"}:
+        update_batch_progress(batch_id, "completed")
         return {"processed": 0, "batch_status": batch.get("status")}
 
     if batch.get("status") in {None, "pending"}:
@@ -338,14 +340,32 @@ def process_pending_jobs(batch_id: str, api_key: str, max_jobs: int = JOBS_PER_T
 
     if _is_aborted(batch_id):
         _abort_batch(batch_id)
+        update_batch_progress(batch_id, "failed")
         return {"processed": 0, "batch_status": "failed"}
 
     jobs = status["fields"]
     queued = [j for j in jobs if j["status"] == "queued"]
+    running_jobs = [j for j in jobs if j["status"] == "running"]
+    regenerating_jobs = [j for j in jobs if j["status"] == "regenerating"]
+
+    # Update progress based on current state
+    if not batch.get("plan_json") and queued:
+        update_batch_progress(batch_id, "planning")
+    elif running_jobs:
+        running_field = running_jobs[0].get("field_key")
+        update_batch_progress(batch_id, "generating", running_field)
+    elif regenerating_jobs:
+        regen_field = regenerating_jobs[0].get("field_key")
+        update_batch_progress(batch_id, "verifying", regen_field)
+    elif not queued and batch.get("status") == "running":
+        update_batch_progress(batch_id, "verifying")
+
     if not queued:
         # Nothing left to run; recompute and settle the batch flag.
         final_status = _compute_batch_status(batch_id)
         update_batch_status(batch_id, final_status)
+        if final_status in {"completed", "partial_failure"}:
+            update_batch_progress(batch_id, "completed")
         return {"processed": 0, "batch_status": final_status}
 
     model_name = batch.get("model_name")
@@ -395,6 +415,8 @@ def process_pending_jobs(batch_id: str, api_key: str, max_jobs: int = JOBS_PER_T
 
     final_status = _compute_batch_status(batch_id)
     update_batch_status(batch_id, final_status)
+    if final_status in {"completed", "partial_failure"}:
+        update_batch_progress(batch_id, "completed")
     return {"processed": len(claimed), "batch_status": final_status}
 
 

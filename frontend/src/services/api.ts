@@ -9,6 +9,42 @@ function getAuthHeader() {
   };
 }
 
+// -----------------------------------------------------------------------
+// Tab-level cache (stale-while-revalidate): pages render previously fetched
+// data instantly on remount while a fresh request runs in the background.
+// Concurrent requests for the same key share one in-flight promise.
+// -----------------------------------------------------------------------
+const responseCache = new Map<string, { data: any; promise: Promise<any> | null }>();
+
+function cachedFetch<T>(key: string, doFetch: () => Promise<T>): Promise<T> {
+  const entry = responseCache.get(key);
+  if (entry?.promise) return entry.promise as Promise<T>;
+  const promise = doFetch()
+    .then((data) => {
+      responseCache.set(key, { data, promise: null });
+      return data;
+    })
+    .catch((err) => {
+      const e = responseCache.get(key);
+      if (e) e.promise = null;
+      throw err;
+    });
+  responseCache.set(key, { data: entry?.data, promise });
+  return promise;
+}
+
+export function getCachedHistory(): HistoryRun[] | null {
+  return responseCache.get('history')?.data ?? null;
+}
+
+export function getCachedComparisonRuns(testRunId: string): any[] | null {
+  return responseCache.get(`comparison-runs:${testRunId}`)?.data ?? null;
+}
+
+export function getCachedComparisonLanguages(): string[] | null {
+  return responseCache.get('comparison-languages')?.data ?? null;
+}
+
 export async function verifyAuth(apiKey: string): Promise<{ success: boolean; token: string }> {
   const res = await fetch(`${API_BASE_URL}/auth/verify`, {
     method: 'POST',
@@ -87,11 +123,13 @@ export async function fetchDashboardStats() {
 }
 
 export async function fetchHistory(): Promise<HistoryRun[]> {
-  const res = await fetch(`${API_BASE_URL}/history`, {
-    headers: getAuthHeader()
+  return cachedFetch('history', async () => {
+    const res = await fetch(`${API_BASE_URL}/history`, {
+      headers: getAuthHeader()
+    });
+    if (!res.ok) throw new Error('Failed to fetch history');
+    return res.json();
   });
-  if (!res.ok) throw new Error('Failed to fetch history');
-  return res.json();
 }
 
 export async function fetchRunDetails(runId: string): Promise<RunDetailsPayload> {
@@ -103,11 +141,24 @@ export async function fetchRunDetails(runId: string): Promise<RunDetailsPayload>
 }
 
 export async function fetchComparisonRuns(testRunId: string): Promise<any[]> {
-  const res = await fetch(`${API_BASE_URL}/comparison/${testRunId || 'default'}`, {
-    headers: getAuthHeader()
+  return cachedFetch(`comparison-runs:${testRunId}`, async () => {
+    const res = await fetch(`${API_BASE_URL}/comparison/${testRunId || 'default'}`, {
+      headers: getAuthHeader()
+    });
+    if (!res.ok) throw new Error('Failed to fetch comparison data');
+    return res.json();
   });
-  if (!res.ok) throw new Error('Failed to fetch comparison data');
-  return res.json();
+}
+
+export async function fetchComparisonLanguages(): Promise<string[]> {
+  return cachedFetch('comparison-languages', async () => {
+    const res = await fetch(`${API_BASE_URL}/comparison/languages`, {
+      headers: getAuthHeader()
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.languages || [];
+  });
 }
 
 export async function fetchSettings(): Promise<AppSettings> {

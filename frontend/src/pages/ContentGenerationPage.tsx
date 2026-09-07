@@ -154,6 +154,28 @@ export const ContentGenerationPage: React.FC = () => {
       }
     : null;
 
+  const getProgressMessage = () => {
+    if (!batchStatus || !batchStatus.progress_phase) return null;
+    const phase = batchStatus.progress_phase;
+    const field = batchStatus.progress_field;
+    switch (phase) {
+      case 'initializing':
+        return '🔄 Initializing batch...';
+      case 'planning':
+        return '📋 Planning content structure...';
+      case 'generating':
+        return field ? `⚡ Generating: ${field}...` : '⚡ Generating fields...';
+      case 'verifying':
+        return field ? `🔍 Verifying: ${field}...` : '🔍 Verifying fields...';
+      case 'completed':
+        return '✅ Batch completed!';
+      case 'failed':
+        return '❌ Batch failed';
+      default:
+        return `Processing... (${phase}${field ? `: ${field}` : ''})`;
+    }
+  };
+
   return (
     <div className="workspace-container">
       <div className="two-column-workspace">
@@ -278,7 +300,7 @@ export const ContentGenerationPage: React.FC = () => {
           <div className="card">
             <div className="card-header-badge"><div className="step-number">5</div><div className="step-title"><Bot size={16} color="#2563EB" /> Execute</div></div>
             <button className="btn-primary" style={{ width: '100%', padding: '14px', fontSize: '15px' }} onClick={handleGenerateClick} disabled={running || !selectedModel}>
-              <Sparkles size={18} /> {running ? 'Working...' : 'Review Batch Prompts'}
+              <Sparkles size={18} /> {running ? (batchStatus?.progress_phase ? `Running: ${batchStatus.progress_phase}${batchStatus.progress_field ? ` (${batchStatus.progress_field})` : ''}...` : 'Working...') : 'Review Batch Prompts'}
             </button>
             <p style={{ fontSize: '11px', color: '#64748B', marginTop: '6px' }}>Every field gets its own prompt. Review all prompts before spending API credits.</p>
           </div>
@@ -288,11 +310,28 @@ export const ContentGenerationPage: React.FC = () => {
       {/* BOTTOM FULL-WIDTH — per-field results */}
       {batchStatus && (
         <div className="card" style={{ marginTop: '24px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px', flexWrap: 'wrap' }}>
             <h3 style={{ fontSize: '16px', fontWeight: 800, margin: 0 }}>Batch Results</h3>
             <span className={`badge badge-${batchStatus.batch_status === 'completed' ? 'verified' : batchStatus.batch_status === 'failed' ? 'failed' : 'unverified'}`}>{batchStatus.batch_status}</span>
             {summary && <span style={{ fontSize: '12px', color: '#64748B' }}>{summary.passed}/{summary.total} passed · {summary.failed} failed</span>}
           </div>
+          {batchStatus.progress_phase && (
+            <div style={{ 
+              padding: '12px 16px', 
+              background: '#F0F9FF', 
+              border: '1px solid #BAE6FD', 
+              borderRadius: '8px', 
+              marginBottom: '16px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px'
+            }}>
+              <span style={{ fontSize: '13px', fontWeight: 600, color: '#0369A1' }}>
+                {getProgressMessage()}
+              </span>
+              {running && <span style={{ fontSize: '11px', color: '#0369A1' }}>(Live updating...)</span>}
+            </div>
+          )}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '16px' }}>
             {batchStatus.fields.map((f) => (
               <div key={f.field_job_id} style={{ border: '1px solid #E2E8F0', borderRadius: '10px', padding: '14px', background: '#FFFFFF' }}>

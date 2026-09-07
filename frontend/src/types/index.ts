@@ -154,5 +154,7 @@ export interface BatchStatus {
   batch_id: string;
   batch_status: string;
   model_name: string;
+  progress_phase?: string;
+  progress_field?: string | null;
   fields: FieldJobStatus[];
 }

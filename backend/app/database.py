@@ -258,11 +258,97 @@ def save_regeneration(generation_id: str, parameter: str, previous_output: Dict[
         except Exception as e:
             print(f"Supabase regeneration insert error: {e}")
 
+def _derive_batch_ui_status(batch_status: Optional[str], jobs: List[Dict[str, Any]]) -> str:
+    """Maps a batch's raw status + field-job outcomes onto the UI status
+    vocabulary (verified / regenerated / failed / partial_failure / pending /
+    running) used by the History filters, History badges and Dashboard KPIs.
+
+    Raw batch statuses are completed/partial_failure/failed/pending/running;
+    "completed" becomes "verified" (or "regenerated" when any field went
+    through a targeted regeneration), so filters and dashboard counters work.
+    """
+    s = (batch_status or "pending").lower()
+    if s in ("failed", "partial_failure", "pending", "running"):
+        return s
+    if s in ("completed", "pass"):
+        regenerated = any(j.get("status") in {"regenerated_pass", "regenerated_fail"} for j in jobs)
+        return "regenerated" if regenerated else "verified"
+    return s
+
 def get_history_runs() -> List[Dict[str, Any]]:
-    """Returns past BATCH runs (post-v2) + legacy generations, deduplicated by batch_id/generation id."""
+    """Returns past BATCH runs (post-v2) + legacy generations, deduplicated by batch_id/generation id.
+    Loads from Supabase (historical) + in-memory (current session)."""
     history_map = {}
 
-    # 1. Load batches + their field jobs (the v2 write path)
+    # 1. Load batches from Supabase (historical data across all serverless instances)
+    if supabase_client:
+        try:
+            # Get all batches with their test_runs, ordered by created_at desc
+            res = supabase_client.table("batches").select("*, test_runs(*)").order("created_at", desc=True).limit(500).execute()
+            if res.data:
+                # Field job stats for all batches in a few chunked queries (not one per batch)
+                jobs_by_batch = list_field_jobs_bulk([b["id"] for b in res.data])
+                for b in res.data:
+                    tr = b.get("test_runs") or {}
+                    test_run_id = b.get("test_run_id")
+                    jobs = jobs_by_batch.get(b["id"], [])
+                    total = len(jobs)
+                    passed = sum(1 for j in jobs if j.get("status") in {"passed", "regenerated_pass"})
+                    history_map[b["id"]] = {
+                        "run_id": b["id"],
+                        "batch_id": b["id"],
+                        "test_run_id": test_run_id,
+                        "country": tr.get("country", "France"),
+                        "city": tr.get("city", "Paris"),
+                        "language": tr.get("language", "English"),
+                        "model": b.get("model_name"),
+                        "model_id": b.get("model_name"),
+                        "attempt_number": 1,
+                        "status": _derive_batch_ui_status(b.get("status"), jobs),
+                        "batch_status": b.get("status"),
+                        "fields_passed": passed,
+                        "fields_total": total,
+                        "latency_ms": sum(j.get("latency_ms", 0) for j in jobs),
+                        "total_tokens": sum(j.get("tokens", 0) for j in jobs),
+                        "cost": round(sum(j.get("cost", 0.0) for j in jobs), 6),
+                        "created_at": b.get("created_at")
+                    }
+        except Exception as e:
+            print(f"Supabase history batches query error: {e}")
+
+    # 2. Load legacy generations from Supabase
+    if supabase_client:
+        try:
+            res = supabase_client.table("generations").select("*, test_runs(*)").order("created_at", desc=True).limit(500).execute()
+            if res.data:
+                for g in res.data:
+                    if g["id"] in history_map:
+                        continue
+                    tr = g.get("test_runs") or {}
+                    test_run_id = g.get("test_run_id")
+                    history_map[g["id"]] = {
+                        "run_id": g["id"],
+                        "batch_id": None,
+                        "test_run_id": test_run_id,
+                        "country": tr.get("country", "France"),
+                        "city": tr.get("city", "Paris"),
+                        "language": tr.get("language", "English"),
+                        "model": g.get("model_name", g["model_id"]),
+                        "model_id": g["model_id"],
+                        "attempt_number": g.get("attempt_number", 1),
+                        "status": g.get("status", "Verified"),
+                        "batch_status": None,
+                        "fields_passed": None,
+                        "fields_total": None,
+                        "latency_ms": g.get("latency_ms", 0),
+                        "total_tokens": g.get("total_tokens", 0),
+                        "cost": g.get("cost", 0.0),
+                        "created_at": g.get("created_at")
+                    }
+        except Exception as e:
+            print(f"Supabase history generations query error: {e}")
+
+    # 3. Merge in-memory (current session) - overrides Supabase for latest state
     for b in reversed(_in_memory_db["batches"]):
         tr = next((t for t in _in_memory_db["test_runs"] if t["id"] == b.get("test_run_id")), {})
         jobs = [j for j in _in_memory_db["field_jobs"] if j["batch_id"] == b["id"]]
@@ -278,7 +364,7 @@ def get_history_runs() -> List[Dict[str, Any]]:
             "model": b.get("model_name"),
             "model_id": b.get("model_name"),
             "attempt_number": 1,
-            "status": b.get("status", "pending"),
+            "status": _derive_batch_ui_status(b.get("status"), jobs),
             "batch_status": b.get("status"),
             "fields_passed": passed,
             "fields_total": total,
@@ -288,7 +374,6 @@ def get_history_runs() -> List[Dict[str, Any]]:
             "created_at": b.get("created_at")
         }
 
-    # 2. Legacy generations (pre-v2) — kept so old rows still appear
     for g in reversed(_in_memory_db["generations"]):
         if g["id"] in history_map:
             continue
@@ -313,7 +398,10 @@ def get_history_runs() -> List[Dict[str, Any]]:
             "created_at": g.get("created_at")
         }
 
-    return list(history_map.values())
+    # Sort by created_at desc (newest first)
+    result = list(history_map.values())
+    result.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    return result
 
 def get_used_models_for_test_run(test_run_id: str) -> List[str]:
     used = set()
@@ -584,22 +672,69 @@ def get_comparison_batches(test_run_id: str) -> List[Dict[str, Any]]:
 
     This is the v2 comparison source: side-by-side comparison joins across field_jobs
     for each selected batch_id, not a single flat generations row.
+    Loads from Supabase (historical) + in-memory (current session).
     """
     runs = []
+
+    # Gather batch rows from Supabase (historical across all serverless instances)
+    # and in-memory (current session). In-memory rows override Supabase rows with
+    # the same id so the UI always shows the latest state.
+    batches_by_id: Dict[str, Dict[str, Any]] = {}
+    if supabase_client:
+        try:
+            res = supabase_client.table("batches").select("*").eq("test_run_id", test_run_id).order("created_at", desc=True).execute()
+            for b in res.data or []:
+                batches_by_id[b["id"]] = b
+        except Exception as e:
+            print(f"Supabase comparison batches query error: {e}")
     for b in _in_memory_db["batches"]:
-        if b.get("test_run_id") != test_run_id:
-            continue
-        jobs = get_batch_field_jobs(b["id"])
-        # A batch is comparable if it reached a terminal state and has at least one field with output.
+        if b.get("test_run_id") == test_run_id:
+            batches_by_id[b["id"]] = b
+
+    # Attach field jobs (with verification results) for ALL batches in a few
+    # chunked queries, instead of one query per batch + one per field job.
+    jobs_by_batch = get_batch_field_jobs_bulk(list(batches_by_id.keys())) if batches_by_id else {}
+    for bid, b in batches_by_id.items():
         runs.append({
-            "batch_id": b["id"],
+            "batch_id": bid,
             "test_run_id": b.get("test_run_id"),
             "model_name": b.get("model_name"),
             "status": b.get("status"),
             "created_at": b.get("created_at"),
-            "fields": jobs,
+            "fields": jobs_by_batch.get(bid, []),
         })
+
     return runs
+
+
+def get_available_languages_for_comparison() -> List[str]:
+    """Returns distinct languages from all test_runs that have batches/generations."""
+    languages = set()
+
+    # From Supabase
+    if supabase_client:
+        try:
+            res = supabase_client.table("test_runs").select("language").execute()
+            if res.data:
+                for tr in res.data:
+                    lang = tr.get("language")
+                    if lang:
+                        languages.add(lang)
+        except Exception as e:
+            print(f"Supabase get languages error: {e}")
+
+    # From in-memory
+    for tr in _in_memory_db["test_runs"]:
+        lang = tr.get("language")
+        if lang:
+            languages.add(lang)
+
+    # Default European languages if none found
+    default_langs = ["English", "German", "French", "Spanish", "Italian", "Portuguese", "Dutch", "Polish", "Russian", "Swedish", "Danish", "Finnish", "Greek", "Czech", "Romanian", "Hungarian"]
+    for lang in default_langs:
+        languages.add(lang)
+
+    return sorted(list(languages))
 
 def create_batch(test_run_id: str, model_name: str) -> str:
     batch_id = str(uuid.uuid4())
@@ -610,6 +745,8 @@ def create_batch(test_run_id: str, model_name: str) -> str:
         "model_name": model_name,
         "status": "pending",
         "plan_json": None,
+        "progress_phase": "initializing",
+        "progress_field": None,
         "created_at": now
     }
     _in_memory_db["batches"].append(batch)
@@ -619,6 +756,23 @@ def create_batch(test_run_id: str, model_name: str) -> str:
         except Exception as e:
             print(f"Supabase batch insert error: {e}")
     return batch_id
+
+
+def update_batch_progress(batch_id: str, progress_phase: str, progress_field: Optional[str] = None):
+    """Update batch progress phase and current field being processed."""
+    batch = get_batch(batch_id)
+    if batch:
+        batch["progress_phase"] = progress_phase
+        if progress_field is not None:
+            batch["progress_field"] = progress_field
+    if supabase_client:
+        try:
+            update_data = {"progress_phase": progress_phase}
+            if progress_field is not None:
+                update_data["progress_field"] = progress_field
+            supabase_client.table("batches").update(update_data).eq("id", batch_id).execute()
+        except Exception as e:
+            print(f"Supabase batch progress update error: {e}")
 
 def create_field_job(batch_id: str, field_key: str, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
     job_id = str(uuid.uuid4())
@@ -686,6 +840,91 @@ def get_batch(batch_id: str) -> Optional[Dict[str, Any]]:
         except Exception as e:
             print(f"Supabase get_batch error: {e}")
     return None
+
+def _chunked(ids: List[str], size: int = 50):
+    for i in range(0, len(ids), size):
+        yield ids[i:i + size]
+
+def list_field_jobs_bulk(batch_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    """All field jobs for many batches, fetched in a few chunked queries.
+
+    Avoids the N+1 pattern of calling list_field_jobs() per batch, which makes
+    one Supabase round-trip per batch and is extremely slow on serverless.
+    """
+    by_batch: Dict[str, List[Dict[str, Any]]] = {bid: [] for bid in batch_ids}
+    missing = []
+    for bid in batch_ids:
+        mem = [j for j in _in_memory_db["field_jobs"] if j["batch_id"] == bid]
+        if mem:
+            by_batch[bid] = mem
+        else:
+            missing.append(bid)
+    if missing and supabase_client:
+        for chunk in _chunked(missing):
+            try:
+                res = supabase_client.table("field_jobs").select("*").in_("batch_id", chunk).order("created_at").execute()
+                for row in res.data or []:
+                    if row.get("batch_id") in by_batch:
+                        by_batch[row["batch_id"]].append(_cache_field_job(row))
+            except Exception as e:
+                print(f"Supabase list_field_jobs_bulk error: {e}")
+    return by_batch
+
+def get_verification_results_bulk(field_job_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    """Latest-attempt verification results for many field jobs in a few chunked queries.
+
+    Same semantics as get_verification_results_for_field(), without the per-job
+    Supabase round-trip.
+    """
+    by_job: Dict[str, List[Dict[str, Any]]] = {}
+    missing = []
+    for fid in field_job_ids:
+        mem = [v for v in _in_memory_db["verification_results"] if v.get("field_job_id") == fid]
+        by_job[fid] = mem
+        if not mem:
+            missing.append(fid)
+    if missing and supabase_client:
+        for chunk in _chunked(missing):
+            try:
+                res = supabase_client.table("verification_results").select("*").in_("field_job_id", chunk).order("created_at").execute()
+                for row in res.data or []:
+                    fid = row.get("field_job_id")
+                    if fid in by_job:
+                        by_job[fid].append(row)
+                        _in_memory_db["verification_results"].append(row)
+            except Exception as e:
+                print(f"Supabase get_verification_results_bulk error: {e}")
+    for fid in field_job_ids:
+        mem = by_job.get(fid) or []
+        if not mem:
+            by_job[fid] = []
+            continue
+        latest_attempt = max(v.get("verification_attempt", 1) for v in mem)
+        by_job[fid] = [v for v in mem if v.get("verification_attempt", 1) == latest_attempt]
+    return by_job
+
+def get_batch_field_jobs_bulk(batch_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    """Per-batch field jobs (with verification results attached) for many batches.
+
+    Same output shape as get_batch_field_jobs(), keyed by batch_id, but fetched
+    with a handful of queries instead of one per batch + one per field job.
+    """
+    jobs_by_batch = list_field_jobs_bulk(batch_ids)
+    all_job_ids = [j["id"] for jobs in jobs_by_batch.values() for j in jobs]
+    ver_by_job = get_verification_results_bulk(all_job_ids)
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for bid in batch_ids:
+        out[bid] = [{
+            "field_job_id": j["id"],
+            "field_key": j["field_key"],
+            "status": j["status"],
+            "output": j.get("output_json_fragment"),
+            "verification_results": ver_by_job.get(j["id"], []),
+            "cost": j.get("cost", 0.0),
+            "tokens": j.get("tokens", 0),
+            "latency_ms": j.get("latency_ms", 0),
+        } for j in jobs_by_batch.get(bid, [])]
+    return out
 
 def list_field_jobs(batch_id: str) -> List[Dict[str, Any]]:
     """All field jobs for a batch, loading from Supabase on cache miss (serverless-safe)."""

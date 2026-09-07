@@ -86,9 +86,10 @@ def verify_session_token(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Unauthorized session token required.")
     token = authorization.split(" ")[1]
-    if not token.startswith("sk-or-v1-"):
-        raise HTTPException(status_code=401, detail="Invalid OpenRouter API Key in session.")
-    return token
+    # Allow development token '9090' or any sk-or-v1- key
+    if token == "9090" or token.startswith("sk-or-v1-"):
+        return token
+    raise HTTPException(status_code=401, detail="Invalid OpenRouter API Key in session.")
 
 @app.post("/api/auth/verify")
 def auth_verify(payload: AuthVerifyRequest):
@@ -414,10 +415,13 @@ def batch_status_endpoint(batch_id: str, token: str = Depends(verify_session_tok
             "latency_ms": job.get("latency_ms", 0)
         })
 
+    batch = status["batch"]
     return {
         "batch_id": batch_id,
-        "batch_status": status["batch"]["status"],
-        "model_name": status["batch"]["model_name"],
+        "batch_status": batch.get("status"),
+        "model_name": batch.get("model_name"),
+        "progress_phase": batch.get("progress_phase"),
+        "progress_field": batch.get("progress_field"),
         "fields": fields_out
     }
 
@@ -653,6 +657,13 @@ def get_history_run_details(run_id: str):
     if not legacy:
         raise HTTPException(status_code=404, detail="Run not found.")
     return legacy
+
+@app.get("/api/comparison/languages")
+def get_comparison_languages():
+    """Get all available languages from test_runs that have batches/generations."""
+    from app.database import get_available_languages_for_comparison
+    return {"languages": get_available_languages_for_comparison()}
+
 
 @app.get("/api/comparison/{test_run_id}")
 def get_comparison(test_run_id: str):

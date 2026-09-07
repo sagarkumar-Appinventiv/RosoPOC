@@ -1,7 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { fetchHistory, fetchComparisonRuns } from '../services/api';
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  fetchHistory, fetchComparisonRuns, fetchComparisonLanguages,
+  getCachedHistory, getCachedComparisonRuns, getCachedComparisonLanguages
+} from '../services/api';
 import type { HistoryRun } from '../types';
-import { Check, Layers } from 'lucide-react';
+import { Check, Layers, Loader2 } from 'lucide-react';
 
 const renderValue = (v: any) => {
   if (v == null) return '—';
@@ -10,28 +13,149 @@ const renderValue = (v: any) => {
 };
 
 export const ModelComparisonPage: React.FC = () => {
-  const [historyRuns, setHistoryRuns] = useState<HistoryRun[]>([]);
-  const [selectedTestRunId, setSelectedTestRunId] = useState('');
-  const [runs, setRuns] = useState<any[]>([]); // one entry per batch/run with fields[]
+  // Seed from the tab-level cache so already-fetched data renders instantly
+  // when switching back to this tab, while a refresh runs in the background.
+  const cachedHistory = getCachedHistory();
+  const cachedLanguages = getCachedComparisonLanguages();
+  const [historyRuns, setHistoryRuns] = useState<HistoryRun[]>(cachedHistory ?? []);
+  const [runs, setRuns] = useState<any[]>([]);
   const [selectedBatchIds, setSelectedBatchIds] = useState<string[]>([]);
   const [compared, setCompared] = useState<any[]>([]);
+  const [availableLanguages, setAvailableLanguages] = useState<string[]>(cachedLanguages ?? []);
+  const [selectedLanguage, setSelectedLanguage] = useState<string>('');
+  const [historyLoading, setHistoryLoading] = useState(!cachedHistory);
+  const [runsLoading, setRunsLoading] = useState(false);
 
   useEffect(() => {
-    fetchHistory().then((data) => {
-      setHistoryRuns(data);
-      if (data.length > 0) setSelectedTestRunId(data[0].test_run_id);
+    let cancelled = false;
+    fetchHistory()
+      .then((data) => { if (!cancelled) setHistoryRuns(data); })
+      .catch((e) => console.error(e))
+      .finally(() => { if (!cancelled) setHistoryLoading(false); });
+
+    fetchComparisonLanguages().then((langs) => {
+      if (!cancelled) setAvailableLanguages(langs);
     }).catch((e) => console.error(e));
+    return () => { cancelled = true; };
   }, []);
 
+  // Filter history runs by selected language
+  const filteredHistoryRuns = useMemo(
+    () => selectedLanguage
+      ? historyRuns.filter(r => r.language === selectedLanguage)
+      : historyRuns,
+    [historyRuns, selectedLanguage]
+  );
+
+  // Keep the derived list stable so selection is not reset on every render.
+  const distinctTestRunIds = useMemo(() => Array.from(new Set(
+    filteredHistoryRuns.map((r) => r.test_run_id).filter(Boolean)
+  )), [filteredHistoryRuns]);
+
+  // Auto-select first test_run_id from filtered runs when language changes
+  // (only used when a specific language is selected)
+  
+
+  // Fetch comparison runs - for "All Languages" fetch all test_run_ids and combine
   useEffect(() => {
-    if (selectedTestRunId) {
-      fetchComparisonRuns(selectedTestRunId).then((data) => {
-        setRuns(data);
-        setSelectedBatchIds([]);
-        setCompared([]);
-      }).catch((e) => console.error(e));
+    if (distinctTestRunIds.length === 0) {
+      setRuns([]);
+      setRunsLoading(false);
+      return;
     }
-  }, [selectedTestRunId]);
+
+    let cancelled = false;
+
+    const fetchWithTimeout = (promise: Promise<any>, timeoutMs = 10000) => {
+      return Promise.race([
+        promise,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Request timeout')), timeoutMs)
+        )
+      ]);
+    };
+
+    const loadRuns = async () => {
+      // Check for cached data FIRST - for both single language and all languages
+      let cachedData: any[] | null = null;
+      
+      if (selectedLanguage) {
+        // Single language: check cache for the first test_run_id
+        const firstId = distinctTestRunIds[0];
+        cachedData = getCachedComparisonRuns(firstId);
+      } else {
+        // All Languages: check if we have cached data for ALL test_run_ids
+        const allCached = distinctTestRunIds.map(id => getCachedComparisonRuns(id));
+        if (allCached.every(c => c !== null)) {
+          // Flatten and deduplicate cached data
+          const combined = allCached.flat();
+          const seen = new Set<string>();
+          cachedData = combined.filter(r => {
+            const key = r.batch_id || r.generation?.id;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+        }
+      }
+
+      // If we have cached data, use it immediately WITHOUT showing loading
+      if (cachedData) {
+        if (!cancelled) {
+          setRuns(cachedData);
+          setRunsLoading(false);
+        }
+      } else {
+        // No cached data - show loading and fetch
+        if (!cancelled) setRunsLoading(true);
+      }
+
+      if (selectedLanguage) {
+        // Single language: fetch only for the first test_run_id
+        try {
+          const data = await fetchComparisonRuns(distinctTestRunIds[0]);
+          if (!cancelled) setRuns(data);
+        } catch (e) {
+          console.error(e);
+        }
+      } else {
+        // "All Languages": fetch for ALL test_run_ids and combine
+        try {
+          const allRunsPromises = distinctTestRunIds.map(id =>
+            fetchWithTimeout(fetchComparisonRuns(id), 10000)
+          );
+          const results = await Promise.allSettled(allRunsPromises);
+          if (!cancelled) {
+            const allRunsArrays = results
+              .filter((r): r is PromiseFulfilledResult<any[]> => r.status === 'fulfilled')
+              .map(r => r.value);
+            // Flatten and deduplicate by batch_id
+            const combined = allRunsArrays.flat();
+            const seen = new Set<string>();
+            const unique = combined.filter(r => {
+              const key = r.batch_id || r.generation?.id;
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            });
+            setRuns(unique);
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      if (!cancelled) setRunsLoading(false);
+    };
+
+    loadRuns();
+    return () => { cancelled = true; };
+  }, [distinctTestRunIds, selectedLanguage]);
+
+  // Reset selection only when the test run context changes (language or test_run_ids), not on every runs update
+  useEffect(() => {
+    setSelectedBatchIds([]);
+    setCompared([]);
+  }, [distinctTestRunIds, selectedLanguage]);
 
   const toggleSelect = (id: string) => {
     setSelectedBatchIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
@@ -47,19 +171,21 @@ export const ModelComparisonPage: React.FC = () => {
   return (
     <div className="workspace-container">
       <div className="card" style={{ padding: '24px 28px', marginBottom: '24px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px', flexWrap: 'wrap', gap: '16px' }}>
           <div>
             <h2 style={{ fontSize: '20px', fontWeight: 800, margin: 0 }}>Model Comparison</h2>
             <p style={{ fontSize: '13px', color: '#64748B', marginTop: '4px' }}>Select 2 or more runs and compare side-by-side, per field.</p>
           </div>
-          <div style={{ width: '260px' }}>
-            <label className="form-label">Select Test Run Context</label>
-            <select className="select-input" value={selectedTestRunId} onChange={(e) => setSelectedTestRunId(e.target.value)}>
-              {historyRuns.filter((v, i, a) => a.findIndex((x) => x.test_run_id === v.test_run_id) === i).map((r) => (
-                <option key={r.run_id} value={r.test_run_id}>{r.city}, {r.country} ({r.language || 'English'})</option>
-              ))}
-              {historyRuns.length === 0 && <option value="default">Paris, France</option>}
-            </select>
+          <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-end' }}>
+            <div style={{ width: '180px' }}>
+              <label className="form-label">Filter by Language</label>
+              <select className="select-input" value={selectedLanguage} onChange={(e) => setSelectedLanguage(e.target.value)}>
+                <option value="">All Languages</option>
+                {availableLanguages.map((lang) => (
+                  <option key={lang} value={lang}>{lang}</option>
+                ))}
+              </select>
+            </div>
           </div>
         </div>
 
@@ -73,7 +199,17 @@ export const ModelComparisonPage: React.FC = () => {
             </button>
           </div>
 
-          {runs.length > 0 ? (
+          {historyLoading ? (
+            <div style={{ padding: '40px', textAlign: 'center', color: '#64748B', border: '1px dashed #CBD5E1', borderRadius: '8px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', fontSize: '13px' }}>
+              <Loader2 size={28} className="animate-spin" color="#2563EB" />
+              Loading test runs...
+            </div>
+          ) : runsLoading ? (
+            <div style={{ padding: '40px', textAlign: 'center', color: '#64748B', border: '1px dashed #CBD5E1', borderRadius: '8px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', fontSize: '13px' }}>
+              <Loader2 size={28} className="animate-spin" color="#2563EB" />
+              Loading runs for this test run...
+            </div>
+          ) : runs.length > 0 ? (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '16px' }}>
               {runs.map((r, idx) => {
                 const id = r.batch_id || r.generation?.id || `run-${idx}`;

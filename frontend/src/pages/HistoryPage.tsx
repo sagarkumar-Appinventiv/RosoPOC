@@ -1,23 +1,35 @@
 import React, { useState, useEffect } from 'react';
-import { fetchHistory } from '../services/api';
+import { fetchHistory, getCachedHistory } from '../services/api';
 import type { HistoryRun } from '../types';
-import { Search } from 'lucide-react';
+import { Search, Loader2 } from 'lucide-react';
 import { RunDetailDrawer } from '../components/RunDetailDrawer';
 
+const normalizeStatus = (s: string) => (s || '').toLowerCase().replace(/_/g, ' ');
+
 export const HistoryPage: React.FC = () => {
-  const [history, setHistory] = useState<HistoryRun[]>([]);
+  // Seed from the tab-level cache so already-fetched data renders instantly
+  // when switching back to this tab, while a refresh runs in the background.
+  const cachedHistory = getCachedHistory();
+  const [history, setHistory] = useState<HistoryRun[]>(cachedHistory ?? []);
+  const [loading, setLoading] = useState(!cachedHistory);
+  const [refreshing, setRefreshing] = useState(!!cachedHistory);
   const [searchTerm, setSearchTerm] = useState('');
   const [modelFilter, setModelFilter] = useState('All Models');
   const [statusFilter, setStatusFilter] = useState('All Status');
+  const [languageFilter, setLanguageFilter] = useState('All Languages');
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     fetchHistory()
-      .then((data) => setHistory(data))
-      .catch((e) => console.error(e));
+      .then((data) => { if (!cancelled) setHistory(data); })
+      .catch((e) => console.error(e))
+      .finally(() => { if (!cancelled) { setLoading(false); setRefreshing(false); } });
+    return () => { cancelled = true; };
   }, []);
 
   const uniqueModels = Array.from(new Set(history.map((h) => h.model || h.model_id))).filter(Boolean);
+  const uniqueLanguages = Array.from(new Set(history.map((h) => h.language).filter(Boolean))).sort();
 
   const filteredHistory = history.filter((run) => {
     const matchesSearch =
@@ -27,8 +39,12 @@ export const HistoryPage: React.FC = () => {
       (run.model || '').toLowerCase().includes(searchTerm.toLowerCase());
 
     const matchesModel = modelFilter === 'All Models' || run.model === modelFilter || run.model_id === modelFilter;
-    const matchesStatus = statusFilter === 'All Status' || (run.status || '').toLowerCase() === statusFilter.toLowerCase();
-    return matchesSearch && matchesModel && matchesStatus;
+    
+    const matchesStatus = statusFilter === 'All Status' || normalizeStatus(run.status) === normalizeStatus(statusFilter);
+    
+    const matchesLanguage = languageFilter === 'All Languages' || run.language === languageFilter;
+    
+    return matchesSearch && matchesModel && matchesStatus && matchesLanguage;
   });
 
   return (
@@ -57,11 +73,20 @@ export const HistoryPage: React.FC = () => {
             ))}
           </select>
 
+          {/* Language Filter */}
+          <select className="select-input" value={languageFilter} onChange={(e) => setLanguageFilter(e.target.value)} style={{ width: '160px' }}>
+            <option value="All Languages">All Languages</option>
+            {uniqueLanguages.map((lang) => (
+              <option key={lang} value={lang}>{lang}</option>
+            ))}
+          </select>
+
           {/* Status Filter */}
           <select className="select-input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ width: '140px' }}>
             <option value="All Status">All Status</option>
             <option value="Verified">Verified</option>
             <option value="Regenerated">Regenerated</option>
+            <option value="Partial Failure">Partial Failure</option>
             <option value="Failed">Failed</option>
           </select>
         </div>
@@ -69,6 +94,12 @@ export const HistoryPage: React.FC = () => {
 
       {/* History Data Table */}
       <div className="card">
+        {(loading || refreshing) && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: '#F0F9FF', borderBottom: '1px solid #BAE6FD', color: '#0369A1', fontSize: '12px', fontWeight: 600 }}>
+            <Loader2 size={14} className="animate-spin" />
+            {loading ? 'Loading history runs...' : 'Refreshing history...'}
+          </div>
+        )}
         <div style={{ overflowX: 'auto' }}>
           <table className="data-table">
             <thead>
@@ -99,7 +130,7 @@ export const HistoryPage: React.FC = () => {
                       <td style={{ fontWeight: 600, color: '#0F172A' }}>{run.model || run.model_id}</td>
                       <td>
                         <span className={`badge badge-${(run.status || 'Verified').toLowerCase()}`}>
-                          {run.batch_status || run.status || 'Verified'}
+                          {run.status || 'Verified'}
                         </span>
                       </td>
                       <td style={{ textAlign: 'center', fontWeight: 600 }}>
@@ -120,6 +151,15 @@ export const HistoryPage: React.FC = () => {
                     </tr>
                   );
                 })
+              ) : loading ? (
+                <tr>
+                  <td colSpan={9} style={{ textAlign: 'center', padding: '48px', color: '#64748B', fontSize: '13px' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
+                      <Loader2 size={28} className="animate-spin" color="#2563EB" />
+                      Loading history runs...
+                    </div>
+                  </td>
+                </tr>
               ) : (
                 <tr>
                   <td colSpan={9} style={{ textAlign: 'center', padding: '32px', color: '#64748B', fontSize: '13px' }}>
