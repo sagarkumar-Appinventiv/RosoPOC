@@ -148,10 +148,14 @@ CREATE TABLE IF NOT EXISTS batches (
     model_name TEXT,
     status TEXT DEFAULT 'pending',
     plan_json JSONB,
+    progress_phase TEXT DEFAULT 'initializing',
+    progress_field TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 ALTER TABLE batches ADD COLUMN IF NOT EXISTS plan_json JSONB;
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS progress_phase TEXT DEFAULT 'initializing';
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS progress_field TEXT;
 
 -- 5. field_jobs (created with updated_at)
 CREATE TABLE IF NOT EXISTS field_jobs (

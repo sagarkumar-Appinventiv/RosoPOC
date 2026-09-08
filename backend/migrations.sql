@@ -4,6 +4,8 @@
 
 -- 1. batches: Semantic Consistency Planner result
 ALTER TABLE batches ADD COLUMN IF NOT EXISTS plan_json JSONB;
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS progress_phase TEXT DEFAULT 'initializing';
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS progress_field TEXT;
 
 -- 2. field_jobs: serverless queue retry-loop protection
 ALTER TABLE field_jobs ADD COLUMN IF NOT EXISTS attempt_count INT DEFAULT 0;

@@ -37,6 +37,10 @@ export function getCachedHistory(): HistoryRun[] | null {
   return responseCache.get('history')?.data ?? null;
 }
 
+export function invalidateHistoryCache() {
+  responseCache.delete('history');
+}
+
 export function getCachedComparisonRuns(testRunId: string): any[] | null {
   return responseCache.get(`comparison-runs:${testRunId}`)?.data ?? null;
 }
@@ -223,6 +227,7 @@ export async function generateBatch(payload: any) {
     const err = await res.json();
     throw new Error(err.detail || 'Failed to start batch');
   }
+  invalidateHistoryCache();
   return res.json();
 }
 

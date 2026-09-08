@@ -32,6 +32,37 @@ def get_supabase_client() -> Client | None:
     
     return _supabase_client
 
+def _supabase_is_configured() -> bool:
+    return bool(os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY"))
+
+def _raise_persistence_error(operation: str, error: Exception) -> None:
+    message = f"Supabase persistence failed during {operation}: {error}"
+    print(message)
+    raise RuntimeError(message) from error
+
+def _get_persistence_client(operation: str) -> Client | None:
+    client = get_supabase_client()
+    if client is None and _supabase_is_configured():
+        raise RuntimeError(f"Supabase is configured but unavailable during {operation}")
+    return client
+
+def _fetch_all_supabase_rows(table: str, select: str) -> List[Dict[str, Any]]:
+    """Read every row in pages so history is not silently capped at 500 rows."""
+    client = get_supabase_client()
+    if not client:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    page_size = 1000
+    offset = 0
+    while True:
+        page = client.table(table).select(select).order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
+        data = page.data or []
+        rows.extend(data)
+        if len(data) < page_size:
+            return rows
+        offset += page_size
+
 # For backward compatibility - use property-like access
 # supabase_client is now accessed via get_supabase_client()
 # This variable is kept for backward compatibility but should not be used directly
@@ -177,11 +208,14 @@ def create_test_run(country: str, city: str, language: str, input_json: Dict[str
     }
     _in_memory_db["prompt_configs"].append(pc_record)
 
-    if get_supabase_client():
+    client = _get_persistence_client("test run creation")
+    if client:
         try:
-            get_supabase_client().table("test_runs").insert(tr_record).execute()
-            get_supabase_client().table("prompt_configs").insert(pc_record).execute()
+            client.table("test_runs").insert(tr_record).execute()
+            client.table("prompt_configs").insert(pc_record).execute()
         except Exception as e:
+            if _supabase_is_configured():
+                _raise_persistence_error("test run creation", e)
             print(f"Supabase insert test run error: {e}")
 
     return test_run_id
@@ -219,10 +253,13 @@ def save_generation(
     }
     _in_memory_db["generations"].append(rec)
 
-    if get_supabase_client():
+    client = _get_persistence_client("generation creation")
+    if client:
         try:
-            get_supabase_client().table("generations").insert(rec).execute()
+            client.table("generations").insert(rec).execute()
         except Exception as e:
+            if _supabase_is_configured():
+                _raise_persistence_error("generation creation", e)
             print(f"Supabase insert generation error: {e}")
 
     return gen_id
@@ -304,11 +341,11 @@ def get_history_runs() -> List[Dict[str, Any]]:
     if get_supabase_client():
         try:
             # Get all batches with their test_runs, ordered by created_at desc
-            res = get_supabase_client().table("batches").select("*, test_runs(*)").order("created_at", desc=True).limit(500).execute()
-            if res.data:
+            batches = _fetch_all_supabase_rows("batches", "*, test_runs(*)")
+            if batches:
                 # Field job stats for all batches in a few chunked queries (not one per batch)
-                jobs_by_batch = list_field_jobs_bulk([b["id"] for b in res.data])
-                for b in res.data:
+                jobs_by_batch = list_field_jobs_bulk([b["id"] for b in batches])
+                for b in batches:
                     tr = b.get("test_runs") or {}
                     test_run_id = b.get("test_run_id")
                     jobs = jobs_by_batch.get(b["id"], [])
@@ -339,9 +376,9 @@ def get_history_runs() -> List[Dict[str, Any]]:
     # 2. Load legacy generations from Supabase
     if get_supabase_client():
         try:
-            res = get_supabase_client().table("generations").select("*, test_runs(*)").order("created_at", desc=True).limit(500).execute()
-            if res.data:
-                for g in res.data:
+            generations = _fetch_all_supabase_rows("generations", "*, test_runs(*)")
+            if generations:
+                for g in generations:
                     if g["id"] in history_map:
                         continue
                     tr = g.get("test_runs") or {}
@@ -769,12 +806,15 @@ def create_batch(test_run_id: str, model_name: str) -> str:
         "progress_field": None,
         "created_at": now
     }
-    _in_memory_db["batches"].append(batch)
-    if get_supabase_client():
+    client = _get_persistence_client("batch creation")
+    if client:
         try:
-            get_supabase_client().table("batches").insert(batch).execute()
+            client.table("batches").insert(batch).execute()
         except Exception as e:
+            if _supabase_is_configured():
+                _raise_persistence_error("batch creation", e)
             print(f"Supabase batch insert error: {e}")
+    _in_memory_db["batches"].append(batch)
     return batch_id
 
 
@@ -812,12 +852,15 @@ def create_field_job(batch_id: str, field_key: str, system_prompt: str, user_pro
         "created_at": now,
         "updated_at": now
     }
-    _in_memory_db["field_jobs"].append(job)
-    if get_supabase_client():
+    client = _get_persistence_client("field job creation")
+    if client:
         try:
-            get_supabase_client().table("field_jobs").insert(job).execute()
+            client.table("field_jobs").insert(job).execute()
         except Exception as e:
+            if _supabase_is_configured():
+                _raise_persistence_error("field job creation", e)
             print(f"Supabase field_job insert error: {e}")
+    _in_memory_db["field_jobs"].append(job)
     return job
 
 def update_field_job(field_job_id: str, update_data: Dict[str, Any]):
