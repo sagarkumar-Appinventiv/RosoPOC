@@ -1,4 +1,4 @@
-import type { ModelInfo, AppSettings, HistoryRun, RunDetailsPayload } from '../types';
+import type { ModelInfo, AppSettings, HistoryRun, RunDetailsPayload, TranslationRun, TranslationSource, TranslationDetail } from '../types';
 
 const API_BASE_URL = '/api';
 function getAuthHeader() {
@@ -39,6 +39,19 @@ export function getCachedHistory(): HistoryRun[] | null {
 
 export function invalidateHistoryCache() {
   responseCache.delete('history');
+}
+
+export function getCachedTranslationHistory(): TranslationRun[] | null {
+  return responseCache.get('translation-history')?.data ?? null;
+}
+
+export function getCachedTranslationLanguages(): string[] | null {
+  return responseCache.get('translation-languages')?.data ?? null;
+}
+
+export function invalidateTranslationCache() {
+  responseCache.delete('translation-history');
+  responseCache.delete('translation-languages');
 }
 
 export function getCachedComparisonRuns(testRunId: string): any[] | null {
@@ -134,6 +147,61 @@ export async function fetchHistory(): Promise<HistoryRun[]> {
     if (!res.ok) throw new Error('Failed to fetch history');
     return res.json();
   });
+}
+
+export async function fetchTranslationSources(): Promise<TranslationSource[]> {
+  const res = await fetch(`${API_BASE_URL}/translation/sources`, { headers: getAuthHeader() });
+  if (!res.ok) throw new Error('Failed to fetch translation sources');
+  return res.json();
+}
+
+export async function fetchTranslationHistory(): Promise<TranslationRun[]> {
+  return cachedFetch('translation-history', async () => {
+    const res = await fetch(`${API_BASE_URL}/translation/history`, { headers: getAuthHeader() });
+    if (!res.ok) throw new Error('Failed to fetch translation history');
+    return res.json();
+  });
+}
+
+export async function generateTranslation(payload: {
+  source_batch_id?: string;
+  source_generation_id?: string;
+  target_language: string;
+  model_id: string;
+  additional_prompt?: string;
+}): Promise<TranslationRun> {
+  const res = await fetch(`${API_BASE_URL}/translation/generate`, {
+    method: 'POST', headers: getAuthHeader(), body: JSON.stringify(payload)
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || 'Translation failed');
+  }
+  invalidateTranslationCache();
+  const data = await res.json();
+  return { ...data, id: data.translation_id };
+}
+
+export async function fetchTranslationDetails(translationId: string): Promise<TranslationDetail> {
+  const res = await fetch(`${API_BASE_URL}/translation/${translationId}`, { headers: getAuthHeader() });
+  if (!res.ok) throw new Error('Failed to fetch translation details');
+  return res.json();
+}
+
+export async function fetchTranslationLanguages(): Promise<string[]> {
+  return cachedFetch('translation-languages', async () => {
+    const res = await fetch(`${API_BASE_URL}/translation/languages`, { headers: getAuthHeader() });
+    if (!res.ok) throw new Error('Failed to fetch translation languages');
+    const data = await res.json();
+    return data.languages || [];
+  });
+}
+
+export async function fetchTranslationComparisonRuns(targetLanguage: string, sourceId?: string): Promise<TranslationRun[]> {
+  const query = sourceId ? `?source_id=${encodeURIComponent(sourceId)}` : '';
+  const res = await fetch(`${API_BASE_URL}/translation/comparison/${encodeURIComponent(targetLanguage)}${query}`, { headers: getAuthHeader() });
+  if (!res.ok) throw new Error('Failed to fetch translation comparison data');
+  return res.json();
 }
 
 export async function fetchRunDetails(runId: string): Promise<RunDetailsPayload> {

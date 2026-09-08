@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
-  fetchHistory, fetchComparisonRuns, fetchComparisonLanguages,
+  fetchHistory, fetchComparisonRuns, fetchComparisonLanguages, fetchTranslationLanguages, fetchTranslationComparisonRuns,
   getCachedHistory, getCachedComparisonRuns, getCachedComparisonLanguages
 } from '../services/api';
 import type { HistoryRun } from '../types';
@@ -10,6 +10,37 @@ const renderValue = (v: any) => {
   if (v == null) return '—';
   if (typeof v === 'string') return v;
   return JSON.stringify(v);
+};
+
+const formatLabel = (key: string) => key.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+const StructuredContent: React.FC<{ value: any }> = ({ value }) => {
+  if (value == null) return <span style={{ color: '#94A3B8' }}>—</span>;
+  if (typeof value !== 'object') return <span>{String(value)}</span>;
+
+  if (Array.isArray(value)) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+        {value.map((item, index) => (
+          <div key={index} style={{ display: 'grid', gridTemplateColumns: '24px minmax(0, 1fr)', gap: '8px', alignItems: 'start' }}>
+            <span style={{ color: '#64748B', fontWeight: 800 }}>{index + 1}.</span>
+            <div style={{ minWidth: 0 }}><StructuredContent value={item} /></div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      {Object.entries(value).map(([key, item]) => (
+        <div key={key} style={{ borderBottom: '1px solid #E2E8F0', paddingBottom: '10px' }}>
+          <div style={{ fontSize: '11px', fontWeight: 800, color: '#475569', marginBottom: '5px' }}>{formatLabel(key)}</div>
+          <div style={{ color: '#1E293B', lineHeight: 1.55 }}><StructuredContent value={item} /></div>
+        </div>
+      ))}
+    </div>
+  );
 };
 
 export const ModelComparisonPage: React.FC = () => {
@@ -26,6 +57,13 @@ export const ModelComparisonPage: React.FC = () => {
   const [historyLoading, setHistoryLoading] = useState(!cachedHistory);
   const [runsLoading, setRunsLoading] = useState(false);
   const [runsError, setRunsError] = useState('');
+  const [comparisonMode, setComparisonMode] = useState<'generation' | 'translation'>('generation');
+  const [translationLanguages, setTranslationLanguages] = useState<string[]>([]);
+  const [translationLanguage, setTranslationLanguage] = useState('');
+  const [translationSourceId, setTranslationSourceId] = useState('');
+  const [translationRuns, setTranslationRuns] = useState<any[]>([]);
+  const [selectedTranslationIds, setSelectedTranslationIds] = useState<string[]>([]);
+  const [comparedTranslations, setComparedTranslations] = useState<any[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -37,8 +75,93 @@ export const ModelComparisonPage: React.FC = () => {
     fetchComparisonLanguages().then((langs) => {
       if (!cancelled) setAvailableLanguages(langs);
     }).catch((e) => console.error(e));
+    fetchTranslationLanguages().then((langs) => {
+      setTranslationLanguages(langs);
+      if (langs[0]) setTranslationLanguage(langs[0]);
+    }).catch((e) => console.error(e));
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (comparisonMode !== 'translation' || !translationLanguage) return;
+    fetchTranslationComparisonRuns(translationLanguage, translationSourceId || undefined)
+      .then(setTranslationRuns).catch((e) => setRunsError(e.message || 'Unable to load translations.'));
+    setSelectedTranslationIds([]);
+    setComparedTranslations([]);
+  }, [comparisonMode, translationLanguage, translationSourceId]);
+
+  const renderTranslationComparison = () => (
+    <>
+      <div className="card" style={{ padding: '24px 28px', marginBottom: '24px' }}>
+        <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <div style={{ width: '200px' }}><label className="form-label">Target language</label><select className="select-input" value={translationLanguage} onChange={(e) => setTranslationLanguage(e.target.value)}>{translationLanguages.map((lang) => <option key={lang}>{lang}</option>)}</select></div>
+          <div style={{ width: '220px' }}><label className="form-label">Source document</label><select className="select-input" value={translationSourceId} onChange={(e) => setTranslationSourceId(e.target.value)}><option value="">All sources</option>{Array.from(new Set(translationRuns.map((run) => run.source_batch_id || run.source_generation_id).filter(Boolean))).map((id) => <option key={id} value={id}>{String(id).substring(0, 8)}</option>)}</select></div>
+          <div style={{ flex: 1, color: '#64748B', fontSize: '13px' }}>Select translations created from the same source document.</div>
+          <button className="btn-primary" disabled={selectedTranslationIds.length < 2} onClick={() => setComparedTranslations(translationRuns.filter((run) => selectedTranslationIds.includes(run.id)))}>Compare Selected ({selectedTranslationIds.length})</button>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '16px', marginTop: '20px' }}>
+          {translationRuns.map((run) => {
+            const checked = selectedTranslationIds.includes(run.id);
+            const sourceId = run.source_batch_id || run.source_generation_id || '';
+            return <div key={run.id} onClick={() => setSelectedTranslationIds((prev) => prev.includes(run.id) ? prev.filter((id) => id !== run.id) : [...prev, run.id])} style={{ border: `2px solid ${checked ? '#2563EB' : '#E2E8F0'}`, padding: '16px', borderRadius: '8px', cursor: 'pointer' }}><strong>{run.model_name}</strong><div style={{ fontSize: '12px', color: '#64748B', marginTop: '8px' }}>Source: {sourceId.substring(0, 8)} · {run.status}</div></div>;
+          })}
+        </div>
+      </div>
+      {comparedTranslations.length > 0 && (
+        <div className="card" style={{ padding: '24px 28px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', gap: '16px', flexWrap: 'wrap' }}>
+            <div>
+              <h3 style={{ fontSize: '16px', fontWeight: 800, margin: 0 }}>Translation Comparison</h3>
+              <p style={{ fontSize: '12px', color: '#64748B', margin: '5px 0 0' }}>
+                Same English source compared across {comparedTranslations.length} models in {translationLanguage}.
+              </p>
+            </div>
+            <span className="badge badge-verified">{translationLanguage}</span>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: `repeat(${comparedTranslations.length}, minmax(320px, 1fr))`, gap: '20px', overflowX: 'auto', alignItems: 'stretch' }}>
+            {comparedTranslations.map((run) => (
+              <div key={run.id} style={{ border: '1px solid #E2E8F0', borderRadius: '14px', background: '#FFFFFF', overflow: 'hidden', display: 'flex', flexDirection: 'column', minWidth: 0, boxShadow: 'var(--shadow-sm)' }}>
+                <div style={{ padding: '16px 20px', background: 'linear-gradient(135deg, #EEF2FF 0%, #E0E7FF 100%)', borderBottom: '1px solid #C7D2FE' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                    <h4 style={{ fontSize: '16px', fontWeight: 800, margin: 0, color: '#3730A3', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={run.model_name}>
+                      {run.model_name}
+                    </h4>
+                    <span className={`badge badge-${String(run.status).toLowerCase()}`}>{run.status}</span>
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#64748B', marginTop: '6px' }}>
+                    {run.model_id || 'OpenRouter model'} · {run.target_language || translationLanguage}
+                  </div>
+                </div>
+
+                <div style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: '18px', flex: 1 }}>
+                  <section>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                      <span style={{ width: '4px', height: '16px', background: '#94A3B8', borderRadius: '2px' }} />
+                      <h5 style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#64748B', margin: 0 }}>Original English</h5>
+                    </div>
+                    <div style={{ margin: 0, padding: '14px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: '8px', fontSize: '12px', maxHeight: '420px', overflowY: 'auto' }}>
+                      <StructuredContent value={run.source_content} />
+                    </div>
+                  </section>
+
+                  <section>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                      <span style={{ width: '4px', height: '16px', background: '#2563EB', borderRadius: '2px' }} />
+                      <h5 style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#2563EB', margin: 0 }}>{translationLanguage} Translation</h5>
+                    </div>
+                    <div style={{ margin: 0, padding: '14px', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: '8px', fontSize: '12px', maxHeight: '520px', overflowY: 'auto' }}>
+                      <StructuredContent value={run.translated_content} />
+                    </div>
+                  </section>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  );
 
   // Filter history runs by selected language
   const filteredHistoryRuns = useMemo(
@@ -157,6 +280,11 @@ export const ModelComparisonPage: React.FC = () => {
 
   return (
     <div className="workspace-container">
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+        <button className={comparisonMode === 'generation' ? 'btn-primary' : 'btn-secondary'} onClick={() => setComparisonMode('generation')}>Generation Comparison</button>
+        <button className={comparisonMode === 'translation' ? 'btn-primary' : 'btn-secondary'} onClick={() => setComparisonMode('translation')}>Translation Comparison</button>
+      </div>
+      {comparisonMode === 'translation' ? renderTranslationComparison() : <>
       <div className="card" style={{ padding: '24px 28px', marginBottom: '24px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px', flexWrap: 'wrap', gap: '16px' }}>
           <div>
@@ -283,6 +411,7 @@ export const ModelComparisonPage: React.FC = () => {
           )}
         </div>
       )}
+      </>}
     </div>
   );
 };

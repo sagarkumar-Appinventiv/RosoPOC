@@ -14,7 +14,9 @@ from app.database import (
     get_field_definitions, get_or_create_field_configs, create_batch, create_field_job,
     get_batch_status, get_field_job, get_field_job_in_batch, update_field_job, update_batch_status,
     get_verification_results_for_field, get_test_run, get_batch, get_batch_field_jobs, get_comparison_batches,
-    get_latest_field_jobs
+    get_latest_field_jobs, get_storage_health, get_translation_sources, create_translation,
+    update_translation, get_translation_history, get_translation, get_translation_languages,
+    get_translation_comparisons
 )
 from app.verification import verify_all_parameters, targeted_regeneration
 from app.prompt_compiler import compile_batch_prompts
@@ -78,6 +80,13 @@ class GenerateBatchRequest(BaseModel):
     test_run_id: str
     model_name: str
     fields: List[GenerateBatchField]
+
+class GenerateTranslationRequest(BaseModel):
+    source_batch_id: Optional[str] = None
+    source_generation_id: Optional[str] = None
+    target_language: str
+    model_id: str
+    additional_prompt: Optional[str] = ""
 
 class RerunFieldRequest(BaseModel):
     pass
@@ -386,6 +395,97 @@ def generate_batch_endpoint(payload: GenerateBatchRequest, token: str = Depends(
         "message": "Batch started. Poll /api/content/batch/{batch_id}/status for progress."
     }
 
+@app.get("/api/translation/sources")
+def translation_sources_endpoint(token: str = Depends(verify_session_token)):
+    return get_translation_sources()
+
+@app.post("/api/translation/generate")
+def generate_translation_endpoint(payload: GenerateTranslationRequest, token: str = Depends(verify_session_token)):
+    if not payload.model_id:
+        raise HTTPException(status_code=400, detail="Please select an OpenRouter model before translating.")
+    if not payload.target_language.strip():
+        raise HTTPException(status_code=400, detail="Please select a target language.")
+    if bool(payload.source_batch_id) == bool(payload.source_generation_id):
+        raise HTTPException(status_code=400, detail="Select exactly one batch or generation source.")
+
+    source_id = payload.source_batch_id or payload.source_generation_id
+    source = next((s for s in get_translation_sources() if s.get("source_batch_id") == source_id or s.get("source_generation_id") == source_id), None)
+    if not source:
+        raise HTTPException(status_code=404, detail="Completed English source run not found.")
+
+    models = fetch_openrouter_models(api_key=token)
+    model_name = next((m.get("name") for m in models if m.get("id") == payload.model_id), payload.model_id)
+    target_language = payload.target_language.strip()
+    prompt = f"""Translate every human-readable string value in this JSON document from English to {target_language}.
+Preserve every JSON key, array, object, number, boolean, null value, and overall structure exactly.
+Do not translate JSON keys, proper nouns, place names, brand names, or URLs unless the additional instruction explicitly requests it.
+Return valid JSON only. Do not add commentary or markdown fences.
+
+JSON document:
+{json.dumps(source['source_content'], ensure_ascii=False, indent=2)}"""
+    if payload.additional_prompt and payload.additional_prompt.strip():
+        prompt += f"\n\nAdditional instruction:\n{payload.additional_prompt.strip()}"
+
+    translation_id = create_translation({
+        "test_run_id": source.get("test_run_id"),
+        "source_batch_id": source.get("source_batch_id"),
+        "source_generation_id": source.get("source_generation_id"),
+        "source_language": source.get("source_language", "English"),
+        "target_language": target_language,
+        "model_id": payload.model_id,
+        "model_name": model_name,
+        "additional_prompt": payload.additional_prompt or "",
+        "status": "pending",
+        "source_content": source["source_content"],
+        "output_json": None,
+        "error_message": None,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "latency_ms": 0,
+        "cost": 0.0,
+    })
+    success, output_json, input_tokens, output_tokens, total_tokens, latency_ms, cost = generate_completion(
+        model_id=payload.model_id,
+        prompt=prompt,
+        api_key=token,
+        system_prompt="You are a professional translator. Return strictly valid JSON and preserve the input structure.",
+        require_generation_schema=False,
+    )
+    updates = {
+        "status": "completed" if success else "failed",
+        "output_json": output_json if success else None,
+        "error_message": None if success else output_json.get("error", "Translation failed."),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "latency_ms": latency_ms,
+        "cost": cost,
+    }
+    update_translation(translation_id, updates)
+    if not success:
+        raise HTTPException(status_code=500, detail=updates["error_message"])
+    return {"success": True, "translation_id": translation_id, **updates, "source": source}
+
+@app.get("/api/translation/history")
+def translation_history_endpoint(token: str = Depends(verify_session_token)):
+    return get_translation_history()
+
+@app.get("/api/translation/languages")
+def translation_languages_endpoint(token: str = Depends(verify_session_token)):
+    return {"languages": get_translation_languages()}
+
+@app.get("/api/translation/comparison/{target_language}")
+def translation_comparison_endpoint(target_language: str, source_id: Optional[str] = None, token: str = Depends(verify_session_token)):
+    return get_translation_comparisons(target_language, source_id)
+
+@app.get("/api/translation/{translation_id}")
+def translation_detail_endpoint(translation_id: str, token: str = Depends(verify_session_token)):
+    detail = get_translation(translation_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Translation not found.")
+    return detail
+
 @app.get("/api/content/batch/{batch_id}/status")
 def batch_status_endpoint(batch_id: str, token: str = Depends(verify_session_token)):
     # Serverless: this poll IS the worker — make progress on queued jobs before
@@ -639,6 +739,13 @@ def regenerate_content_endpoint(payload: ContentRegenerateRequest, token: str = 
 @app.get("/api/history")
 def get_history():
     return get_history_runs()
+
+@app.get("/api/health/storage")
+def storage_health(token: str = Depends(verify_session_token)):
+    try:
+        return get_storage_health()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Storage health check failed: {e}") from e
 
 @app.get("/api/history/{run_id}")
 def get_history_run_details(run_id: str):

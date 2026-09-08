@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { fetchRunDetails } from '../services/api';
+import { fetchRunDetails, fetchTranslationDetails } from '../services/api';
 import { X } from 'lucide-react';
 
 interface RunDetailDrawerProps {
   runId: string;
+  kind?: 'generation' | 'translation';
   onClose: () => void;
 }
 
@@ -65,17 +66,40 @@ const OutputBlock: React.FC<{ output: any }> = ({ output }) => (
   </pre>
 );
 
-export const RunDetailDrawer: React.FC<RunDetailDrawerProps> = ({ runId, onClose }) => {
+export const RunDetailDrawer: React.FC<RunDetailDrawerProps> = ({ runId, kind = 'generation', onClose }) => {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setLoading(true);
-    fetchRunDetails(runId)
+    const request = kind === 'translation' ? fetchTranslationDetails(runId) : fetchRunDetails(runId);
+    request
       .then((res) => setData(res))
       .catch((err) => console.error(err))
       .finally(() => setLoading(false));
-  }, [runId]);
+  }, [runId, kind]);
+
+  if (kind === 'translation' && data?.translation) {
+    const translation = data.translation;
+    return (
+      <div className="drawer-overlay" onClick={onClose}>
+        <div className="drawer-content" onClick={(e) => e.stopPropagation()}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px', paddingBottom: '16px', borderBottom: '1px solid #E2E8F0' }}>
+            <div><h3 style={{ fontSize: '18px', fontWeight: 700 }}>Translation Details ({runId.substring(0, 8)})</h3><span style={{ fontSize: '12px', color: '#64748B' }}>{data.source?.city}, {data.source?.country} · {translation.target_language}</span></div>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748B' }}><X size={24} /></button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px', marginBottom: '24px' }}>
+            <div className="metric-card" style={{ padding: '12px' }}><div className="metric-label">Latency</div><div style={{ fontWeight: 700 }}>{(translation.latency_ms / 1000).toFixed(2)}s</div></div>
+            <div className="metric-card" style={{ padding: '12px' }}><div className="metric-label">Tokens</div><div style={{ fontWeight: 700 }}>{translation.total_tokens}</div></div>
+            <div className="metric-card" style={{ padding: '12px' }}><div className="metric-label">Cost</div><div style={{ fontWeight: 700 }}>${(translation.cost || 0).toFixed(4)}</div></div>
+          </div>
+          <p style={{ fontSize: '13px' }}><strong>Model:</strong> {translation.model_name} · <strong>Status:</strong> {translation.status}</p>
+          <h4>Original English</h4><OutputBlock output={translation.source_content} />
+          <h4 style={{ marginTop: '20px' }}>Translated Output</h4><OutputBlock output={translation.output_json || translation.error_message} />
+        </div>
+      </div>
+    );
+  }
 
   // v2 batch run shape: { batch, test_run, prompt_config, fields[] }
   // legacy single-generation shape: { generation, test_run, prompt_config, verification_results[] }

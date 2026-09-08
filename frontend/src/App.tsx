@@ -7,6 +7,7 @@ import { HistoryPage } from './pages/HistoryPage';
 import { ModelComparisonPage } from './pages/ModelComparisonPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { OpenRouterKeyPage } from './pages/OpenRouterKeyPage';
+import { TranslationPage } from './pages/TranslationPage';
 import { RunDetailDrawer } from './components/RunDetailDrawer';
 import { ActiveGenerationProvider } from './context/ActiveGenerationContext';
 
@@ -25,6 +26,7 @@ export function App() {
     dashboard: 'Dashboard Overview',
     generate: 'Content Generation Interface',
     history: 'History Runs & Audit Trail',
+    translation: 'Content Translation',
     comparison: 'Side-by-Side Model Comparison',
     settings: 'AI / Prompt Settings Configuration'
   };
@@ -48,6 +50,8 @@ export function App() {
           {activeTab === 'generate' && <ContentGenerationPage />}
 
           {activeTab === 'history' && <HistoryPage />}
+
+          {activeTab === 'translation' && <TranslationPage />}
 
           {activeTab === 'comparison' && <ModelComparisonPage />}
 

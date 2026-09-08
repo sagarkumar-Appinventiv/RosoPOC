@@ -64,7 +64,7 @@ def calculate_completion_cost(model_id: str, input_tokens: int, output_tokens: i
     c_price = float(model.get("pricing", {}).get("completion", 0.0000006))
     return round((input_tokens * p_price) + (output_tokens * c_price), 6)
 
-def validate_and_parse_json(text: str) -> Tuple[bool, Dict[str, Any]]:
+def validate_and_parse_json(text: str, require_generation_schema: bool = True) -> Tuple[bool, Dict[str, Any]]:
     cleaned = text.strip()
     if cleaned.startswith("```json"):
         cleaned = cleaned[7:]
@@ -77,6 +77,8 @@ def validate_and_parse_json(text: str) -> Tuple[bool, Dict[str, Any]]:
     try:
         data = json.loads(cleaned)
         if isinstance(data, dict):
+            if not require_generation_schema:
+                return True, data
             required_keys = ["title", "introduction", "attractions", "activities"]
             if all(k in data for k in required_keys):
                 return True, data
@@ -216,7 +218,7 @@ def _create_mock_content(model_id: str, prompt: str) -> Dict[str, Any]:
 
     return data
 
-def generate_completion(model_id: str, prompt: str, api_key: str, system_prompt: str = "You are a professional travel content writer for RosoTravel. Return strictly valid JSON.") -> Tuple[bool, Dict[str, Any], int, int, int, int, float]:
+def generate_completion(model_id: str, prompt: str, api_key: str, system_prompt: str = "You are a professional travel content writer for RosoTravel. Return strictly valid JSON.", require_generation_schema: bool = True) -> Tuple[bool, Dict[str, Any], int, int, int, int, float]:
     if not api_key:
         mock_data = _create_mock_content(model_id, prompt)
         return True, mock_data, 1800, 850, 2650, 1420, 0.008
@@ -257,7 +259,7 @@ def generate_completion(model_id: str, prompt: str, api_key: str, system_prompt:
             total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
 
             content = choices[0]["message"]["content"] if choices else ""
-            valid, parsed_json = validate_and_parse_json(content)
+            valid, parsed_json = validate_and_parse_json(content, require_generation_schema=require_generation_schema)
 
             models_list = fetch_openrouter_models(api_key=api_key)
             cost = calculate_completion_cost(model_id, input_tokens, output_tokens, models_list)

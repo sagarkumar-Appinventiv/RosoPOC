@@ -1,5 +1,5 @@
 import React from 'react';
-import { LayoutDashboard, Sparkles, History, GitCompare, Settings } from 'lucide-react';
+import { LayoutDashboard, Sparkles, History, Languages, GitCompare, Settings } from 'lucide-react';
 
 interface SidebarProps {
   activeTab: string;
@@ -11,6 +11,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'generate', label: 'Content Generation', icon: Sparkles },
     { id: 'history', label: 'History', icon: History },
+    { id: 'translation', label: 'Translation', icon: Languages },
     { id: 'comparison', label: 'Model Comparison', icon: GitCompare },
     { id: 'settings', label: 'AI / Prompt Settings', icon: Settings },
   ];

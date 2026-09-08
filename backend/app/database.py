@@ -77,7 +77,8 @@ _in_memory_db = {
     "field_definitions": [],
     "field_configs": [],
     "batches": [],
-    "field_jobs": []
+    "field_jobs": [],
+    "translations": []
 }
 
 # Seed catalogue (Section 3.4 of rosotravel_batch_architecture_v2.md)
@@ -336,9 +337,10 @@ def get_history_runs() -> List[Dict[str, Any]]:
     """Returns past BATCH runs (post-v2) + legacy generations, deduplicated by batch_id/generation id.
     Loads from Supabase (historical) + in-memory (current session)."""
     history_map = {}
+    client = _get_persistence_client("history read")
 
     # 1. Load batches from Supabase (historical data across all serverless instances)
-    if get_supabase_client():
+    if client:
         try:
             # Get all batches with their test_runs, ordered by created_at desc
             batches = _fetch_all_supabase_rows("batches", "*, test_runs(*)")
@@ -371,10 +373,12 @@ def get_history_runs() -> List[Dict[str, Any]]:
                         "created_at": b.get("created_at")
                     }
         except Exception as e:
+            if _supabase_is_configured():
+                _raise_persistence_error("batch history read", e)
             print(f"Supabase history batches query error: {e}")
 
     # 2. Load legacy generations from Supabase
-    if get_supabase_client():
+    if client:
         try:
             generations = _fetch_all_supabase_rows("generations", "*, test_runs(*)")
             if generations:
@@ -403,6 +407,8 @@ def get_history_runs() -> List[Dict[str, Any]]:
                         "created_at": g.get("created_at")
                     }
         except Exception as e:
+            if _supabase_is_configured():
+                _raise_persistence_error("generation history read", e)
             print(f"Supabase history generations query error: {e}")
 
     # 3. Merge in-memory (current session) - overrides Supabase for latest state
@@ -459,6 +465,26 @@ def get_history_runs() -> List[Dict[str, Any]]:
     result = list(history_map.values())
     result.sort(key=lambda x: x.get("created_at") or "", reverse=True)
     return result
+
+def get_storage_health() -> Dict[str, Any]:
+    """Return non-sensitive storage connectivity and row-count diagnostics."""
+    configured = _supabase_is_configured()
+    client = get_supabase_client()
+    health: Dict[str, Any] = {
+        "supabase_configured": configured,
+        "supabase_connected": client is not None,
+        "tables": {},
+    }
+    if not client:
+        return health
+
+    for table in ("test_runs", "generations", "batches", "field_jobs"):
+        result = client.table(table).select("id, created_at", count="exact").order("created_at", desc=True).limit(1).execute()
+        health["tables"][table] = {
+            "count": result.count,
+            "latest_created_at": result.data[0].get("created_at") if result.data else None,
+        }
+    return health
 
 def get_used_models_for_test_run(test_run_id: str) -> List[str]:
     used = set()
@@ -1055,6 +1081,125 @@ def update_batch_status(batch_id: str, status: str):
             get_supabase_client().table("batches").update({"status": status}).eq("id", batch_id).execute()
         except Exception as e:
             print(f"Supabase batch status update error: {e}")
+
+def assemble_batch_output(batch_id: str) -> Optional[Dict[str, Any]]:
+    """Build one JSON document from the latest completed field per key."""
+    batch = get_batch(batch_id)
+    if not batch or batch.get("status") != "completed":
+        return None
+    jobs = get_latest_field_jobs(batch_id)
+    if not jobs or any(j.get("status") not in {"passed", "regenerated_pass"} or j.get("output_json_fragment") is None for j in jobs):
+        return None
+    return {j["field_key"]: j["output_json_fragment"] for j in jobs}
+
+def get_translation_sources() -> List[Dict[str, Any]]:
+    """Return completed English batches and legacy generations as translation sources."""
+    sources: Dict[str, Dict[str, Any]] = {}
+    for run in get_history_runs():
+        if (run.get("language") or "").lower() != "english":
+            continue
+        if run.get("batch_id"):
+            content = assemble_batch_output(run["batch_id"])
+            if content is None:
+                continue
+            source_id = f"batch:{run['batch_id']}"
+            sources[source_id] = {
+                "source_type": "batch",
+                "source_batch_id": run["batch_id"],
+                "source_generation_id": None,
+                "test_run_id": run.get("test_run_id"),
+                "run_id": run["run_id"],
+                "country": run.get("country"),
+                "city": run.get("city"),
+                "source_language": run.get("language", "English"),
+                "model_id": run.get("model_id"),
+                "model_name": run.get("model"),
+                "created_at": run.get("created_at"),
+                "source_content": content,
+            }
+        elif run.get("run_id"):
+            detail = get_run_details(run["run_id"])
+            generation = (detail or {}).get("generation") or {}
+            content = generation.get("output_json")
+            if not isinstance(content, dict) or "error" in content or run.get("status", "").lower() in {"failed", "unverified"}:
+                continue
+            source_id = f"generation:{run['run_id']}"
+            sources[source_id] = {
+                "source_type": "generation",
+                "source_batch_id": None,
+                "source_generation_id": run["run_id"],
+                "test_run_id": run.get("test_run_id"),
+                "run_id": run["run_id"],
+                "country": run.get("country"),
+                "city": run.get("city"),
+                "source_language": run.get("language", "English"),
+                "model_id": run.get("model_id"),
+                "model_name": run.get("model"),
+                "created_at": run.get("created_at"),
+                "source_content": content,
+            }
+    return sorted(sources.values(), key=lambda x: x.get("created_at") or "", reverse=True)
+
+def create_translation(data: Dict[str, Any]) -> str:
+    translation_id = str(uuid.uuid4())
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    record = {"id": translation_id, **data, "created_at": now, "updated_at": now}
+    _in_memory_db["translations"].append(record)
+    client = _get_persistence_client("translation creation")
+    if client:
+        try:
+            client.table("translations").insert(record).execute()
+        except Exception as e:
+            if _supabase_is_configured():
+                _raise_persistence_error("translation creation", e)
+            print(f"Supabase translation insert error: {e}")
+    return translation_id
+
+def update_translation(translation_id: str, updates: Dict[str, Any]) -> None:
+    record = next((t for t in _in_memory_db["translations"] if t["id"] == translation_id), None)
+    if record:
+        record.update(updates)
+        record["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    if get_supabase_client():
+        get_supabase_client().table("translations").update(updates).eq("id", translation_id).execute()
+
+def get_translation_history() -> List[Dict[str, Any]]:
+    records: Dict[str, Dict[str, Any]] = {}
+    if get_supabase_client():
+        try:
+            res = get_supabase_client().table("translations").select("*").order("created_at", desc=True).execute()
+            records.update({r["id"]: r for r in (res.data or [])})
+        except Exception as e:
+            print(f"Supabase translation history query error: {e}")
+    records.update({r["id"]: r for r in _in_memory_db["translations"]})
+    sources = {s.get("source_batch_id") or s.get("source_generation_id"): s for s in get_translation_sources()}
+    result = []
+    for record in records.values():
+        source = sources.get(record.get("source_batch_id") or record.get("source_generation_id"), {})
+        result.append({**record, "country": source.get("country"), "city": source.get("city"), "source_model": source.get("model_name")})
+    return sorted(result, key=lambda x: x.get("created_at") or "", reverse=True)
+
+def get_translation(translation_id: str) -> Optional[Dict[str, Any]]:
+    record = next((t for t in _in_memory_db["translations"] if t["id"] == translation_id), None)
+    if not record and get_supabase_client():
+        res = get_supabase_client().table("translations").select("*").eq("id", translation_id).limit(1).execute()
+        record = res.data[0] if res.data else None
+    if not record:
+        return None
+    source_id = record.get("source_batch_id") or record.get("source_generation_id")
+    source = next((s for s in get_translation_sources() if s.get("source_batch_id") == source_id or s.get("source_generation_id") == source_id), None)
+    return {"translation": record, "source": source}
+
+def get_translation_languages() -> List[str]:
+    languages = {"English", "Spanish", "French", "German", "Italian", "Portuguese", "Dutch", "Russian", "Polish", "Swedish", "Danish", "Finnish", "Greek", "Czech", "Romanian", "Hungarian"}
+    languages.update(t.get("target_language") for t in _in_memory_db["translations"] if t.get("target_language"))
+    return sorted(languages)
+
+def get_translation_comparisons(target_language: str, source_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    rows = [r for r in get_translation_history() if r.get("target_language") == target_language and r.get("status") == "completed"]
+    if source_id:
+        rows = [r for r in rows if r.get("source_batch_id") == source_id or r.get("source_generation_id") == source_id]
+    return [{**r, "source_content": r.get("source_content"), "translated_content": r.get("output_json")} for r in rows]
 
 def update_batch_plan(batch_id: str, plan_json: Optional[Dict[str, Any]]):
     """Stores the Semantic Consistency Planner result on the batch for audit/debugging."""

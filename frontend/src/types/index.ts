@@ -158,3 +158,45 @@ export interface BatchStatus {
   progress_field?: string | null;
   fields: FieldJobStatus[];
 }
+
+export interface TranslationSource {
+  source_type: 'batch' | 'generation';
+  source_batch_id: string | null;
+  source_generation_id: string | null;
+  test_run_id: string;
+  run_id: string;
+  country: string;
+  city: string;
+  source_language: string;
+  model_id: string;
+  model_name: string;
+  created_at: string;
+  source_content: Record<string, any>;
+}
+
+export interface TranslationRun {
+  id: string;
+  test_run_id: string | null;
+  source_batch_id: string | null;
+  source_generation_id: string | null;
+  source_language: string;
+  target_language: string;
+  model_id: string;
+  model_name: string;
+  additional_prompt: string;
+  status: string;
+  source_content: Record<string, any>;
+  output_json: Record<string, any> | null;
+  error_message?: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  latency_ms: number;
+  cost: number;
+  created_at: string;
+}
+
+export interface TranslationDetail {
+  translation: TranslationRun;
+  source: TranslationSource | null;
+}
