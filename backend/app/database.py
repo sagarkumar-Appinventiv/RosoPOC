@@ -4,18 +4,38 @@ from typing import Dict, Any, List, Optional
 
 import os
 from supabase import create_client, Client
+from dotenv import load_dotenv
 
-supabase_url = os.environ.get("SUPABASE_URL")
-supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+# Load .env file for Supabase credentials (runs at import time)
+env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
+load_dotenv(dotenv_path=env_path)
 
-if supabase_url and supabase_key:
-    try:
-        supabase_client: Client = create_client(supabase_url, supabase_key)
-    except Exception as e:
-        print(f"Failed to initialize Supabase client (Invalid API key?): {e}")
-        supabase_client = None
-else:
-    supabase_client = None
+_supabase_client: Client | None = None
+
+def get_supabase_client() -> Client | None:
+    """Lazily initialize and return the Supabase client."""
+    global _supabase_client
+    if _supabase_client is not None:
+        return _supabase_client
+    
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    
+    if supabase_url and supabase_key:
+        try:
+            _supabase_client = create_client(supabase_url, supabase_key)
+        except Exception as e:
+            print(f"Failed to initialize Supabase client (Invalid API key?): {e}")
+            _supabase_client = None
+    else:
+        _supabase_client = None
+    
+    return _supabase_client
+
+# For backward compatibility - use property-like access
+# supabase_client is now accessed via get_supabase_client()
+# This variable is kept for backward compatibility but should not be used directly
+supabase_client = None
 
 _in_memory_db = {
     "test_runs": [],
@@ -64,9 +84,9 @@ def get_settings() -> Dict[str, Any]:
         "field_matching_strictness": "moderate"
     }
 
-    if supabase_client:
+    if get_supabase_client():
         try:
-            res = supabase_client.table("app_settings").select("*").limit(1).execute()
+            res = get_supabase_client().table("app_settings").select("*").limit(1).execute()
             if res.data and len(res.data) > 0:
                 return {**default_settings, **res.data[0]}
         except Exception as e:
@@ -78,15 +98,15 @@ def update_settings(new_settings: Dict[str, Any]) -> Dict[str, Any]:
     current = get_settings()
     updated = {**current, **new_settings}
 
-    if supabase_client:
+    if get_supabase_client():
         try:
-            res = supabase_client.table("app_settings").select("id").limit(1).execute()
+            res = get_supabase_client().table("app_settings").select("id").limit(1).execute()
             if res.data and len(res.data) > 0:
                 settings_id = res.data[0]["id"]
-                supabase_client.table("app_settings").update(updated).eq("id", settings_id).execute()
+                get_supabase_client().table("app_settings").update(updated).eq("id", settings_id).execute()
             else:
                 updated["id"] = str(uuid.uuid4())
-                supabase_client.table("app_settings").insert(updated).execute()
+                get_supabase_client().table("app_settings").insert(updated).execute()
         except Exception as e:
             print(f"Supabase update settings error: {e}")
 
@@ -109,9 +129,9 @@ def find_matching_test_run(country: str, city: str, language: str, input_json: D
             pc_matches(tr["id"])):
             return tr["id"]
 
-    if supabase_client:
+    if get_supabase_client():
         try:
-            res = supabase_client.table("test_runs").select("*, prompt_configs(*)").order("created_at", desc=True).limit(10).execute()
+            res = get_supabase_client().table("test_runs").select("*, prompt_configs(*)").order("created_at", desc=True).limit(10).execute()
             if res.data:
                 for tr in res.data:
                     if (tr.get("country", "").lower() == country.lower() and
@@ -157,10 +177,10 @@ def create_test_run(country: str, city: str, language: str, input_json: Dict[str
     }
     _in_memory_db["prompt_configs"].append(pc_record)
 
-    if supabase_client:
+    if get_supabase_client():
         try:
-            supabase_client.table("test_runs").insert(tr_record).execute()
-            supabase_client.table("prompt_configs").insert(pc_record).execute()
+            get_supabase_client().table("test_runs").insert(tr_record).execute()
+            get_supabase_client().table("prompt_configs").insert(pc_record).execute()
         except Exception as e:
             print(f"Supabase insert test run error: {e}")
 
@@ -199,9 +219,9 @@ def save_generation(
     }
     _in_memory_db["generations"].append(rec)
 
-    if supabase_client:
+    if get_supabase_client():
         try:
-            supabase_client.table("generations").insert(rec).execute()
+            get_supabase_client().table("generations").insert(rec).execute()
         except Exception as e:
             print(f"Supabase insert generation error: {e}")
 
@@ -212,9 +232,9 @@ def update_generation_record(generation_id: str, update_data: Dict[str, Any]):
     if gen:
         gen.update(update_data)
 
-    if supabase_client:
+    if get_supabase_client():
         try:
-            supabase_client.table("generations").update(update_data).eq("id", generation_id).execute()
+            get_supabase_client().table("generations").update(update_data).eq("id", generation_id).execute()
         except Exception as e:
             print(f"Supabase update generation error: {e}")
 
@@ -234,9 +254,9 @@ def save_verification_results(generation_id: str, verification_attempt: int, res
         records.append(rec)
         _in_memory_db["verification_results"].append(rec)
 
-    if supabase_client:
+    if get_supabase_client():
         try:
-            supabase_client.table("verification_results").insert(records).execute()
+            get_supabase_client().table("verification_results").insert(records).execute()
         except Exception as e:
             print(f"Supabase verification insert error: {e}")
 
@@ -252,9 +272,9 @@ def save_regeneration(generation_id: str, parameter: str, previous_output: Dict[
         "created_at": now
     }
     _in_memory_db["regenerations"].append(rec)
-    if supabase_client:
+    if get_supabase_client():
         try:
-            supabase_client.table("regenerations").insert(rec).execute()
+            get_supabase_client().table("regenerations").insert(rec).execute()
         except Exception as e:
             print(f"Supabase regeneration insert error: {e}")
 
@@ -281,10 +301,10 @@ def get_history_runs() -> List[Dict[str, Any]]:
     history_map = {}
 
     # 1. Load batches from Supabase (historical data across all serverless instances)
-    if supabase_client:
+    if get_supabase_client():
         try:
             # Get all batches with their test_runs, ordered by created_at desc
-            res = supabase_client.table("batches").select("*, test_runs(*)").order("created_at", desc=True).limit(500).execute()
+            res = get_supabase_client().table("batches").select("*, test_runs(*)").order("created_at", desc=True).limit(500).execute()
             if res.data:
                 # Field job stats for all batches in a few chunked queries (not one per batch)
                 jobs_by_batch = list_field_jobs_bulk([b["id"] for b in res.data])
@@ -317,9 +337,9 @@ def get_history_runs() -> List[Dict[str, Any]]:
             print(f"Supabase history batches query error: {e}")
 
     # 2. Load legacy generations from Supabase
-    if supabase_client:
+    if get_supabase_client():
         try:
-            res = supabase_client.table("generations").select("*, test_runs(*)").order("created_at", desc=True).limit(500).execute()
+            res = get_supabase_client().table("generations").select("*, test_runs(*)").order("created_at", desc=True).limit(500).execute()
             if res.data:
                 for g in res.data:
                     if g["id"] in history_map:
@@ -411,9 +431,9 @@ def get_used_models_for_test_run(test_run_id: str) -> List[str]:
     return list(used)
 
 def get_run_details(run_id: str) -> Optional[Dict[str, Any]]:
-    if supabase_client:
+    if get_supabase_client():
         try:
-            res = supabase_client.table("generations").select("*, test_runs(*, prompt_configs(*)), verification_results(*), regenerations(*)").eq("id", run_id).limit(1).execute()
+            res = get_supabase_client().table("generations").select("*, test_runs(*, prompt_configs(*)), verification_results(*), regenerations(*)").eq("id", run_id).limit(1).execute()
             if res.data and len(res.data) > 0:
                 g = res.data[0]
                 tr = g.get("test_runs") or {}
@@ -445,9 +465,9 @@ def get_run_details(run_id: str) -> Optional[Dict[str, Any]]:
 
 def get_comparison_runs(test_run_id: str) -> List[Dict[str, Any]]:
     runs = []
-    if supabase_client:
+    if get_supabase_client():
         try:
-            res = supabase_client.table("generations").select("*, test_runs(*, prompt_configs(*)), verification_results(*), regenerations(*)").eq("test_run_id", test_run_id).execute()
+            res = get_supabase_client().table("generations").select("*, test_runs(*, prompt_configs(*)), verification_results(*), regenerations(*)").eq("test_run_id", test_run_id).execute()
             if res.data:
                 for g in res.data:
                     if g.get("status") in ["Verified", "Regenerated", "Pass", "PASS"] and "error" not in g.get("output_json", {}):
@@ -498,9 +518,9 @@ def get_field_definitions(schema_type: str = "city_page") -> List[Dict[str, Any]
     if mem:
         return mem
 
-    if supabase_client:
+    if get_supabase_client():
         try:
-            res = supabase_client.table("field_definitions").select("*").eq("schema_type", schema_type).order("default_order").execute()
+            res = get_supabase_client().table("field_definitions").select("*").eq("schema_type", schema_type).order("default_order").execute()
             if res.data:
                 _in_memory_db["field_definitions"].extend(res.data)
                 return res.data
@@ -518,9 +538,9 @@ def get_test_run(test_run_id: str) -> Optional[Dict[str, Any]]:
         return {"test_run": tr, "prompt_config": pc}
 
     # Fall back to Supabase so a fresh/restarted process still resolves existing test runs.
-    if supabase_client:
+    if get_supabase_client():
         try:
-            res = supabase_client.table("test_runs").select("*, prompt_configs(*)").eq("id", test_run_id).limit(1).execute()
+            res = get_supabase_client().table("test_runs").select("*, prompt_configs(*)").eq("id", test_run_id).limit(1).execute()
             if res.data:
                 tr = res.data[0]
                 pcs = tr.get("prompt_configs", [])
@@ -543,9 +563,9 @@ def get_or_create_field_configs(test_run_id: str, field_keys: List[str]) -> List
     existing_keys = {c["field_key"] for c in configs}
 
     # Load any stored configs for this run from Supabase (another serverless instance may own them).
-    if supabase_client:
+    if get_supabase_client():
         try:
-            res = supabase_client.table("field_configs").select("*").eq("test_run_id", test_run_id).execute()
+            res = get_supabase_client().table("field_configs").select("*").eq("test_run_id", test_run_id).execute()
             for row in res.data or []:
                 if row["field_key"] not in existing_keys:
                     _in_memory_db["field_configs"].append(row)
@@ -584,9 +604,9 @@ def get_or_create_field_configs(test_run_id: str, field_keys: List[str]) -> List
             cfg["unit"] = expected_unit
             
             # Persist to Supabase
-            if supabase_client:
+            if get_supabase_client():
                 try:
-                    supabase_client.table("field_configs").update({
+                    get_supabase_client().table("field_configs").update({
                         "length_mode": expected_mode,
                         "length_min": expected_min,
                         "length_max": expected_max,
@@ -627,9 +647,9 @@ def get_or_create_field_configs(test_run_id: str, field_keys: List[str]) -> List
         _in_memory_db["field_configs"].append(cfg)
         configs.append(cfg)
         existing_keys.add(fk)
-        if supabase_client:
+        if get_supabase_client():
             try:
-                supabase_client.table("field_configs").insert(cfg).execute()
+                get_supabase_client().table("field_configs").insert(cfg).execute()
             except Exception as e:
                 print(f"Supabase field_config insert error: {e}")
 
@@ -639,9 +659,9 @@ def get_field_config(test_run_id: str, field_key: str) -> Optional[Dict[str, Any
     mem = next((c for c in _in_memory_db["field_configs"] if c["test_run_id"] == test_run_id and c["field_key"] == field_key), None)
     if mem:
         return mem
-    if supabase_client:
+    if get_supabase_client():
         try:
-            res = supabase_client.table("field_configs").select("*").eq("test_run_id", test_run_id).eq("field_key", field_key).limit(1).execute()
+            res = get_supabase_client().table("field_configs").select("*").eq("test_run_id", test_run_id).eq("field_key", field_key).limit(1).execute()
             if res.data:
                 row = res.data[0]
                 _in_memory_db["field_configs"].append(row)
@@ -680,9 +700,9 @@ def get_comparison_batches(test_run_id: str) -> List[Dict[str, Any]]:
     # and in-memory (current session). In-memory rows override Supabase rows with
     # the same id so the UI always shows the latest state.
     batches_by_id: Dict[str, Dict[str, Any]] = {}
-    if supabase_client:
+    if get_supabase_client():
         try:
-            res = supabase_client.table("batches").select("*").eq("test_run_id", test_run_id).order("created_at", desc=True).execute()
+            res = get_supabase_client().table("batches").select("*").eq("test_run_id", test_run_id).order("created_at", desc=True).execute()
             for b in res.data or []:
                 batches_by_id[b["id"]] = b
         except Exception as e:
@@ -712,9 +732,9 @@ def get_available_languages_for_comparison() -> List[str]:
     languages = set()
 
     # From Supabase
-    if supabase_client:
+    if get_supabase_client():
         try:
-            res = supabase_client.table("test_runs").select("language").execute()
+            res = get_supabase_client().table("test_runs").select("language").execute()
             if res.data:
                 for tr in res.data:
                     lang = tr.get("language")
@@ -750,9 +770,9 @@ def create_batch(test_run_id: str, model_name: str) -> str:
         "created_at": now
     }
     _in_memory_db["batches"].append(batch)
-    if supabase_client:
+    if get_supabase_client():
         try:
-            supabase_client.table("batches").insert(batch).execute()
+            get_supabase_client().table("batches").insert(batch).execute()
         except Exception as e:
             print(f"Supabase batch insert error: {e}")
     return batch_id
@@ -765,12 +785,12 @@ def update_batch_progress(batch_id: str, progress_phase: str, progress_field: Op
         batch["progress_phase"] = progress_phase
         if progress_field is not None:
             batch["progress_field"] = progress_field
-    if supabase_client:
+    if get_supabase_client():
         try:
             update_data = {"progress_phase": progress_phase}
             if progress_field is not None:
                 update_data["progress_field"] = progress_field
-            supabase_client.table("batches").update(update_data).eq("id", batch_id).execute()
+            get_supabase_client().table("batches").update(update_data).eq("id", batch_id).execute()
         except Exception as e:
             print(f"Supabase batch progress update error: {e}")
 
@@ -793,9 +813,9 @@ def create_field_job(batch_id: str, field_key: str, system_prompt: str, user_pro
         "updated_at": now
     }
     _in_memory_db["field_jobs"].append(job)
-    if supabase_client:
+    if get_supabase_client():
         try:
-            supabase_client.table("field_jobs").insert(job).execute()
+            get_supabase_client().table("field_jobs").insert(job).execute()
         except Exception as e:
             print(f"Supabase field_job insert error: {e}")
     return job
@@ -805,9 +825,9 @@ def update_field_job(field_job_id: str, update_data: Dict[str, Any]):
     if job:
         job.update(update_data)
         job["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    if supabase_client:
+    if get_supabase_client():
         try:
-            supabase_client.table("field_jobs").update(update_data).eq("id", field_job_id).execute()
+            get_supabase_client().table("field_jobs").update(update_data).eq("id", field_job_id).execute()
         except Exception as e:
             print(f"Supabase field_job update error: {e}")
 
@@ -832,9 +852,9 @@ def get_batch(batch_id: str) -> Optional[Dict[str, Any]]:
     mem = next((b for b in _in_memory_db["batches"] if b["id"] == batch_id), None)
     if mem:
         return mem
-    if supabase_client:
+    if get_supabase_client():
         try:
-            res = supabase_client.table("batches").select("*").eq("id", batch_id).limit(1).execute()
+            res = get_supabase_client().table("batches").select("*").eq("id", batch_id).limit(1).execute()
             if res.data:
                 return _cache_batch(res.data[0])
         except Exception as e:
@@ -859,10 +879,10 @@ def list_field_jobs_bulk(batch_ids: List[str]) -> Dict[str, List[Dict[str, Any]]
             by_batch[bid] = mem
         else:
             missing.append(bid)
-    if missing and supabase_client:
+    if missing and get_supabase_client():
         for chunk in _chunked(missing):
             try:
-                res = supabase_client.table("field_jobs").select("*").in_("batch_id", chunk).order("created_at").execute()
+                res = get_supabase_client().table("field_jobs").select("*").in_("batch_id", chunk).order("created_at").execute()
                 for row in res.data or []:
                     if row.get("batch_id") in by_batch:
                         by_batch[row["batch_id"]].append(_cache_field_job(row))
@@ -883,10 +903,10 @@ def get_verification_results_bulk(field_job_ids: List[str]) -> Dict[str, List[Di
         by_job[fid] = mem
         if not mem:
             missing.append(fid)
-    if missing and supabase_client:
+    if missing and get_supabase_client():
         for chunk in _chunked(missing):
             try:
-                res = supabase_client.table("verification_results").select("*").in_("field_job_id", chunk).order("created_at").execute()
+                res = get_supabase_client().table("verification_results").select("*").in_("field_job_id", chunk).order("created_at").execute()
                 for row in res.data or []:
                     fid = row.get("field_job_id")
                     if fid in by_job:
@@ -929,10 +949,10 @@ def get_batch_field_jobs_bulk(batch_ids: List[str]) -> Dict[str, List[Dict[str, 
 def list_field_jobs(batch_id: str) -> List[Dict[str, Any]]:
     """All field jobs for a batch, loading from Supabase on cache miss (serverless-safe)."""
     jobs = [j for j in _in_memory_db["field_jobs"] if j["batch_id"] == batch_id]
-    if jobs or not supabase_client:
+    if jobs or not get_supabase_client():
         return jobs
     try:
-        res = supabase_client.table("field_jobs").select("*").eq("batch_id", batch_id).order("created_at").execute()
+        res = get_supabase_client().table("field_jobs").select("*").eq("batch_id", batch_id).order("created_at").execute()
         out = []
         for row in res.data or []:
             out.append(_cache_field_job(row))
@@ -951,9 +971,9 @@ def get_field_job(field_job_id: str) -> Optional[Dict[str, Any]]:
     mem = next((j for j in _in_memory_db["field_jobs"] if j["id"] == field_job_id), None)
     if mem:
         return mem
-    if supabase_client:
+    if get_supabase_client():
         try:
-            res = supabase_client.table("field_jobs").select("*").eq("id", field_job_id).limit(1).execute()
+            res = get_supabase_client().table("field_jobs").select("*").eq("id", field_job_id).limit(1).execute()
             if res.data:
                 return _cache_field_job(res.data[0])
         except Exception as e:
@@ -987,9 +1007,9 @@ def update_batch_status(batch_id: str, status: str):
     batch = get_batch(batch_id)
     if batch:
         batch["status"] = status
-    if supabase_client:
+    if get_supabase_client():
         try:
-            supabase_client.table("batches").update({"status": status}).eq("id", batch_id).execute()
+            get_supabase_client().table("batches").update({"status": status}).eq("id", batch_id).execute()
         except Exception as e:
             print(f"Supabase batch status update error: {e}")
 
@@ -998,9 +1018,9 @@ def update_batch_plan(batch_id: str, plan_json: Optional[Dict[str, Any]]):
     batch = get_batch(batch_id)
     if batch:
         batch["plan_json"] = plan_json
-    if supabase_client:
+    if get_supabase_client():
         try:
-            supabase_client.table("batches").update({"plan_json": plan_json}).eq("id", batch_id).execute()
+            get_supabase_client().table("batches").update({"plan_json": plan_json}).eq("id", batch_id).execute()
         except Exception as e:
             print(f"Supabase batch plan update error: {e}")
 
@@ -1022,9 +1042,9 @@ def save_verification_results_scoped(field_job_id: str, verification_attempt: in
         }
         records.append(rec)
         _in_memory_db["verification_results"].append(rec)
-    if supabase_client:
+    if get_supabase_client():
         try:
-            supabase_client.table("verification_results").insert(records).execute()
+            get_supabase_client().table("verification_results").insert(records).execute()
         except Exception as e:
             print(f"Supabase scoped verification insert error: {e}")
 
@@ -1037,9 +1057,9 @@ def get_verification_results_for_field(field_job_id: str) -> List[Dict[str, Any]
     """
     mem = [v for v in _in_memory_db["verification_results"] if v.get("field_job_id") == field_job_id]
 
-    if not mem and supabase_client:
+    if not mem and get_supabase_client():
         try:
-            res = supabase_client.table("verification_results").select("*").eq("field_job_id", field_job_id).order("created_at").execute()
+            res = get_supabase_client().table("verification_results").select("*").eq("field_job_id", field_job_id).order("created_at").execute()
             for row in res.data or []:
                 _in_memory_db["verification_results"].append(row)
             mem = [row for row in (res.data or [])]
@@ -1065,9 +1085,9 @@ def save_regeneration_scoped(field_job_id: str, parameter: str, previous_output:
         "created_at": now
     }
     _in_memory_db["regenerations"].append(rec)
-    if supabase_client:
+    if get_supabase_client():
         try:
-            supabase_client.table("regenerations").insert(rec).execute()
+            get_supabase_client().table("regenerations").insert(rec).execute()
         except Exception as e:
             print(f"Supabase scoped regeneration insert error: {e}")
 
@@ -1119,7 +1139,7 @@ def claim_next_queued_job(batch_id: str) -> Optional[Dict[str, Any]]:
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     # In-memory path (local dev / single process).
-    if not supabase_client:
+    if not get_supabase_client():
         for j in list_field_jobs(batch_id):
             if j.get("status") == "queued":
                 update_field_job(j["id"], {"status": "running", "updated_at": now})
@@ -1128,12 +1148,12 @@ def claim_next_queued_job(batch_id: str) -> Optional[Dict[str, Any]]:
 
     try:
         # Pick the oldest queued job…
-        sel = supabase_client.table("field_jobs").select("id").eq("batch_id", batch_id).eq("status", "queued").order("created_at").limit(1).execute()
+        sel = get_supabase_client().table("field_jobs").select("id").eq("batch_id", batch_id).eq("status", "queued").order("created_at").limit(1).execute()
         if not sel.data:
             return None
         cand_id = sel.data[0]["id"]
         # …and claim it conditionally so only one concurrent instance wins.
-        upd = supabase_client.table("field_jobs").update({"status": "running", "updated_at": now}).eq("id", cand_id).eq("status", "queued").execute()
+        upd = get_supabase_client().table("field_jobs").update({"status": "running", "updated_at": now}).eq("id", cand_id).eq("status", "queued").execute()
         if not upd.data:
             return None  # someone else claimed it
         row = upd.data[0]

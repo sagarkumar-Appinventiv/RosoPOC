@@ -25,6 +25,7 @@ export const ModelComparisonPage: React.FC = () => {
   const [selectedLanguage, setSelectedLanguage] = useState<string>('');
   const [historyLoading, setHistoryLoading] = useState(!cachedHistory);
   const [runsLoading, setRunsLoading] = useState(false);
+  const [runsError, setRunsError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -47,7 +48,7 @@ export const ModelComparisonPage: React.FC = () => {
     [historyRuns, selectedLanguage]
   );
 
-  // Keep the derived list stable so selection is not reset on every render.
+  // Keep the derived list stable so checkbox clicks do not reset selection.
   const distinctTestRunIds = useMemo(() => Array.from(new Set(
     filteredHistoryRuns.map((r) => r.test_run_id).filter(Boolean)
   )), [filteredHistoryRuns]);
@@ -60,6 +61,7 @@ export const ModelComparisonPage: React.FC = () => {
   useEffect(() => {
     if (distinctTestRunIds.length === 0) {
       setRuns([]);
+      setRunsError('');
       setRunsLoading(false);
       return;
     }
@@ -76,27 +78,22 @@ export const ModelComparisonPage: React.FC = () => {
     };
 
     const loadRuns = async () => {
+      if (!cancelled) setRunsError('');
       // Check for cached data FIRST - for both single language and all languages
       let cachedData: any[] | null = null;
       
-      if (selectedLanguage) {
-        // Single language: check cache for the first test_run_id
-        const firstId = distinctTestRunIds[0];
-        cachedData = getCachedComparisonRuns(firstId);
-      } else {
-        // All Languages: check if we have cached data for ALL test_run_ids
-        const allCached = distinctTestRunIds.map(id => getCachedComparisonRuns(id));
-        if (allCached.every(c => c !== null)) {
-          // Flatten and deduplicate cached data
-          const combined = allCached.flat();
-          const seen = new Set<string>();
-          cachedData = combined.filter(r => {
-            const key = r.batch_id || r.generation?.id;
-            if (seen.has(key)) return false;
-            seen.add(key);
-            return true;
-          });
-        }
+      // A language can contain multiple test runs. Use cached data only when
+      // every test-run request is cached, then combine and deduplicate it.
+      const allCached = distinctTestRunIds.map(id => getCachedComparisonRuns(id));
+      if (allCached.every(c => c !== null)) {
+        const combined = allCached.flat();
+        const seen = new Set<string>();
+        cachedData = combined.filter(r => {
+          const key = r.batch_id || r.generation?.id;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
       }
 
       // If we have cached data, use it immediately WITHOUT showing loading
@@ -110,39 +107,29 @@ export const ModelComparisonPage: React.FC = () => {
         if (!cancelled) setRunsLoading(true);
       }
 
-      if (selectedLanguage) {
-        // Single language: fetch only for the first test_run_id
-        try {
-          const data = await fetchComparisonRuns(distinctTestRunIds[0]);
-          if (!cancelled) setRuns(data);
-        } catch (e) {
-          console.error(e);
+      // Fetch every test run for both a language filter and All Languages.
+      try {
+        const allRunsPromises = distinctTestRunIds.map(id =>
+          fetchWithTimeout(fetchComparisonRuns(id), 10000)
+        );
+        const results = await Promise.allSettled(allRunsPromises);
+        if (!cancelled) {
+          const allRunsArrays = results
+            .filter((r): r is PromiseFulfilledResult<any[]> => r.status === 'fulfilled')
+            .map(r => r.value);
+          const combined = allRunsArrays.flat();
+          const seen = new Set<string>();
+          const unique = combined.filter(r => {
+            const key = r.batch_id || r.generation?.id;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+          setRuns(unique);
         }
-      } else {
-        // "All Languages": fetch for ALL test_run_ids and combine
-        try {
-          const allRunsPromises = distinctTestRunIds.map(id =>
-            fetchWithTimeout(fetchComparisonRuns(id), 10000)
-          );
-          const results = await Promise.allSettled(allRunsPromises);
-          if (!cancelled) {
-            const allRunsArrays = results
-              .filter((r): r is PromiseFulfilledResult<any[]> => r.status === 'fulfilled')
-              .map(r => r.value);
-            // Flatten and deduplicate by batch_id
-            const combined = allRunsArrays.flat();
-            const seen = new Set<string>();
-            const unique = combined.filter(r => {
-              const key = r.batch_id || r.generation?.id;
-              if (seen.has(key)) return false;
-              seen.add(key);
-              return true;
-            });
-            setRuns(unique);
-          }
-        } catch (e) {
-          console.error(e);
-        }
+      } catch (e) {
+        console.error(e);
+        if (!cancelled) setRunsError('Unable to load comparison runs. Make sure the backend is running on port 8000.');
       }
       if (!cancelled) setRunsLoading(false);
     };
@@ -208,6 +195,10 @@ export const ModelComparisonPage: React.FC = () => {
             <div style={{ padding: '40px', textAlign: 'center', color: '#64748B', border: '1px dashed #CBD5E1', borderRadius: '8px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', fontSize: '13px' }}>
               <Loader2 size={28} className="animate-spin" color="#2563EB" />
               Loading runs for this test run...
+            </div>
+          ) : runsError ? (
+            <div style={{ padding: '20px', textAlign: 'center', color: '#B91C1C', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '8px', fontSize: '13px' }}>
+              {runsError}
             </div>
           ) : runs.length > 0 ? (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '16px' }}>
