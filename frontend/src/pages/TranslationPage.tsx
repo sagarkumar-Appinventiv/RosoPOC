@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { fetchModels, fetchTranslationSources, generateTranslation } from '../services/api';
 import type { ModelInfo, TranslationRun, TranslationSource } from '../types';
 import { Languages, Loader2, ArrowRight } from 'lucide-react';
+import StructuredContent from '../components/StructuredContent';
 
 const LANGUAGES = ['Spanish', 'French', 'German', 'Italian', 'Portuguese', 'Dutch', 'Russian', 'Polish', 'Swedish', 'Danish', 'Finnish', 'Greek', 'Czech', 'Romanian', 'Hungarian'];
 
@@ -32,7 +33,7 @@ export const TranslationPage: React.FC = () => {
       .catch((e) => setError(e.message || 'Failed to fetch translation sources.'))
       .finally(() => { sourcesLoaded = true; finishLoading(); });
 
-    fetchModels()
+    fetchModels('translation')
       .then((modelData) => {
         if (modelData?.length) {
           setModels(modelData);
@@ -102,8 +103,18 @@ export const TranslationPage: React.FC = () => {
 
       {source && <div className="card" style={{ padding: '20px' }}>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
-          <div><h3 style={{ fontSize: '15px' }}>Original English</h3><pre style={{ whiteSpace: 'pre-wrap', maxHeight: '500px', overflow: 'auto' }}>{JSON.stringify(source.source_content, null, 2)}</pre></div>
-          <div><h3 style={{ fontSize: '15px' }}>Translated output</h3><pre style={{ whiteSpace: 'pre-wrap', maxHeight: '500px', overflow: 'auto' }}>{result ? JSON.stringify(result.output_json, null, 2) : 'Translation output will appear here.'}</pre></div>
+          <div>
+            <h3 style={{ fontSize: '15px' }}>Original English</h3>
+            <div style={{ padding: '14px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: '8px', fontSize: '12px', maxHeight: '500px', overflowY: 'auto' }}>
+              <StructuredContent value={source.source_content} />
+            </div>
+          </div>
+          <div>
+            <h3 style={{ fontSize: '15px' }}>{targetLanguage} Translation</h3>
+            <div style={{ padding: '14px', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: '8px', fontSize: '12px', maxHeight: '500px', overflowY: 'auto' }}>
+              {result ? <StructuredContent value={result.output_json} /> : <span style={{ color: '#64748B' }}>Translation output will appear here.</span>}
+            </div>
+          </div>
         </div>
       </div>}
     </div>

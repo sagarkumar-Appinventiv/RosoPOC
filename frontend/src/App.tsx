@@ -8,6 +8,7 @@ import { ModelComparisonPage } from './pages/ModelComparisonPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { OpenRouterKeyPage } from './pages/OpenRouterKeyPage';
 import { TranslationPage } from './pages/TranslationPage';
+import { ModelConfigPage } from './pages/ModelConfigPage';
 import { RunDetailDrawer } from './components/RunDetailDrawer';
 import { ActiveGenerationProvider } from './context/ActiveGenerationContext';
 
@@ -27,6 +28,7 @@ export function App() {
     generate: 'Content Generation Interface',
     history: 'History Runs & Audit Trail',
     translation: 'Content Translation',
+    modelConfig: 'Model Configuration',
     comparison: 'Side-by-Side Model Comparison',
     settings: 'AI / Prompt Settings Configuration'
   };
@@ -52,6 +54,8 @@ export function App() {
           {activeTab === 'history' && <HistoryPage />}
 
           {activeTab === 'translation' && <TranslationPage />}
+
+          {activeTab === 'modelConfig' && <ModelConfigPage />}
 
           {activeTab === 'comparison' && <ModelComparisonPage />}
 

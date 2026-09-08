@@ -1,4 +1,4 @@
-import type { ModelInfo, AppSettings, HistoryRun, RunDetailsPayload, TranslationRun, TranslationSource, TranslationDetail } from '../types';
+import type { ModelInfo, ModelConfig, AppSettings, HistoryRun, RunDetailsPayload, TranslationRun, TranslationSource, TranslationDetail } from '../types';
 
 const API_BASE_URL = '/api';
 function getAuthHeader() {
@@ -75,11 +75,33 @@ export async function verifyAuth(apiKey: string): Promise<{ success: boolean; to
   return res.json();
 }
 
-export async function fetchModels(): Promise<ModelInfo[]> {
-  const res = await fetch(`${API_BASE_URL}/models`, {
+export async function fetchModels(purpose?: 'generation' | 'translation'): Promise<ModelInfo[]> {
+  const query = purpose ? `?purpose=${purpose}` : '';
+  const res = await fetch(`${API_BASE_URL}/models${query}`, {
     headers: getAuthHeader()
   });
   if (!res.ok) throw new Error('Failed to fetch models');
+  return res.json();
+}
+
+export async function fetchModelConfig(): Promise<ModelConfig[]> {
+  const res = await fetch(`${API_BASE_URL}/models/config`, { headers: getAuthHeader() });
+  if (!res.ok) throw new Error('Failed to fetch model configuration');
+  return res.json();
+}
+
+export async function saveModelConfig(models: Array<{ model_id: string; generation_enabled: boolean; translation_enabled: boolean }>): Promise<ModelConfig[]> {
+  const res = await fetch(`${API_BASE_URL}/models/config`, {
+    method: 'POST',
+    headers: getAuthHeader(),
+    body: JSON.stringify({ models })
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || 'Failed to save model configuration');
+  }
+  responseCache.delete('models:generation');
+  responseCache.delete('models:translation');
   return res.json();
 }
 

@@ -9,6 +9,11 @@ export interface ModelInfo {
   };
 }
 
+export interface ModelConfig extends ModelInfo {
+  generation_enabled: boolean;
+  translation_enabled: boolean;
+}
+
 export interface VerificationResult {
   parameter: string;
   status: 'PASS' | 'FAIL';

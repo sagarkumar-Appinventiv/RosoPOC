@@ -16,6 +16,7 @@ export const HistoryPage: React.FC = () => {
   const [translations, setTranslations] = useState<TranslationRun[]>(cachedTranslations ?? []);
   const [loading, setLoading] = useState(!cachedHistory);
   const [refreshing, setRefreshing] = useState(!!cachedHistory);
+  const [translationLoading, setTranslationLoading] = useState(!cachedTranslations);
   const [searchTerm, setSearchTerm] = useState('');
   const [modelFilter, setModelFilter] = useState('All Models');
   const [statusFilter, setStatusFilter] = useState('All Status');
@@ -29,7 +30,10 @@ export const HistoryPage: React.FC = () => {
       .then((data) => { if (!cancelled) setHistory(data); })
       .catch((e) => console.error(e))
       .finally(() => { if (!cancelled) { setLoading(false); setRefreshing(false); } });
-    fetchTranslationHistory().then((data) => { if (!cancelled) setTranslations(data); }).catch((e) => console.error(e));
+    fetchTranslationHistory()
+      .then((data) => { if (!cancelled) setTranslations(data); })
+      .catch((e) => console.error(e))
+      .finally(() => { if (!cancelled) setTranslationLoading(false); });
     return () => { cancelled = true; };
   }, []);
 
@@ -113,10 +117,10 @@ export const HistoryPage: React.FC = () => {
 
       {/* History Data Table */}
       <div className="card">
-        {(loading || refreshing) && (
+        {((viewMode === 'generation' && (loading || refreshing)) || (viewMode === 'translation' && translationLoading)) && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: '#F0F9FF', borderBottom: '1px solid #BAE6FD', color: '#0369A1', fontSize: '12px', fontWeight: 600 }}>
             <Loader2 size={14} className="animate-spin" />
-            {loading ? 'Loading history runs...' : 'Refreshing history...'}
+            {viewMode === 'translation' ? 'Loading translation history...' : (loading ? 'Loading history runs...' : 'Refreshing history...')}
           </div>
         )}
         <div style={{ overflowX: 'auto' }}>
@@ -137,7 +141,9 @@ export const HistoryPage: React.FC = () => {
               </tr>}
             </thead>
             <tbody>
-              {viewMode === 'translation' ? (filteredTranslations.length > 0 ? filteredTranslations.map((run) => (
+              {viewMode === 'translation' && translationLoading ? (
+                <tr><td colSpan={9} style={{ textAlign: 'center', padding: '48px', color: '#64748B' }}><Loader2 size={28} className="animate-spin" color="#2563EB" /><div style={{ marginTop: '10px' }}>Loading translation history...</div></td></tr>
+              ) : viewMode === 'translation' ? (filteredTranslations.length > 0 ? filteredTranslations.map((run) => (
                 <tr key={run.id}>
                   <td style={{ fontWeight: 700, color: '#2563EB', fontFamily: 'var(--font-mono)', fontSize: '13px' }}>{run.id.substring(0, 8)}</td>
                   <td>{(run.source_batch_id || run.source_generation_id || '').substring(0, 8)}</td><td>{run.target_language}</td><td>{run.model_name || run.model_id}</td>

@@ -15,14 +15,6 @@ const SUGGESTED_TONES = ['Friendly', 'Professional', 'Inspirational', 'Informati
 const SUGGESTED_KEYWORDS = ['perfect', 'amazing', 'best', 'must-visit'];
 const PREDEFINED_LANGUAGES = ['English', 'Spanish', 'French', 'German', 'Italian', 'Portuguese', 'Dutch', 'Russian', 'Polish', 'Swedish', 'Danish', 'Finnish', 'Greek', 'Czech', 'Romanian', 'Hungarian'];
 
-const FULL_OPENROUTER_MODELS: ModelInfo[] = [
-  { id: "openai/gpt-4o", name: "GPT-4o (OpenAI)", context_length: 128000, pricing: { prompt: "0.0000025", completion: "0.00001" } },
-  { id: "openai/gpt-4o-mini", name: "GPT-4o Mini (OpenAI)", context_length: 128000, pricing: { prompt: "0.00000015", completion: "0.0000006" } },
-  { id: "meta-llama/llama-3.3-70b-instruct", name: "Llama 3.3 70B Instruct (Meta)", context_length: 128000, pricing: { prompt: "0.0000004", completion: "0.0000004" } },
-  { id: "deepseek/deepseek-chat", name: "DeepSeek V3 (DeepSeek)", context_length: 64000, pricing: { prompt: "0.00000014", completion: "0.00000028" } },
-  { id: "qwen/qwen-2.5-72b-instruct", name: "Qwen 2.5 72B Instruct (Qwen)", context_length: 131072, pricing: { prompt: "0.00000035", completion: "0.0000004" } },
-];
-
 const defaultFieldConfig = (fd: FieldDefinition) => ({
   field_key: fd.field_key,
   length_mode: fd.length_mode,
@@ -41,7 +33,7 @@ export const ContentGenerationPage: React.FC = () => {
   const [country] = useState('France');
   const [city] = useState('Paris');
   const [selectedLanguage, setSelectedLanguage] = useState('English');
-  const [models, setModels] = useState<ModelInfo[]>(FULL_OPENROUTER_MODELS);
+  const [models, setModels] = useState<ModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState('');
 
   // Source data (pure content input — no generation-control fields)
@@ -74,7 +66,7 @@ export const ContentGenerationPage: React.FC = () => {
         setInputJson(fb); setJsonText(JSON.stringify(fb, null, 2));
       });
 
-    fetchModels().then((d) => { if (d && d.length) setModels(d); }).catch(() => {});
+    fetchModels('generation').then(setModels).catch(() => {});
     fetchFieldSchema().then((fds: FieldDefinition[]) => {
       setFieldDefs(fds);
       const cfgs: Record<string, any> = {};

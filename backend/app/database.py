@@ -78,7 +78,8 @@ _in_memory_db = {
     "field_configs": [],
     "batches": [],
     "field_jobs": [],
-    "translations": []
+    "translations": [],
+    "model_configs": []
 }
 
 # Seed catalogue (Section 3.4 of rosotravel_batch_architecture_v2.md)
@@ -101,6 +102,62 @@ def _seed_field_definitions():
     return _in_memory_db["field_definitions"]
 
 _seed_field_definitions()
+
+def get_model_configurations() -> List[Dict[str, Any]]:
+    """Return saved model flags, preferring persisted rows when available."""
+    records: Dict[str, Dict[str, Any]] = {}
+    if get_supabase_client():
+        try:
+            res = get_supabase_client().table("model_configs").select("*").execute()
+            records.update({row["model_id"]: row for row in (res.data or []) if row.get("model_id")})
+        except Exception as e:
+            print(f"Supabase model config query error: {e}")
+    records.update({row["model_id"]: row for row in _in_memory_db["model_configs"] if row.get("model_id")})
+    return list(records.values())
+
+def merge_model_configurations(models: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Merge current OpenRouter models with saved flags without enabling new models."""
+    saved = {row["model_id"]: row for row in get_model_configurations()}
+    return [{
+        **model,
+        "generation_enabled": bool(saved.get(model["id"], {}).get("generation_enabled", False)),
+        "translation_enabled": bool(saved.get(model["id"], {}).get("translation_enabled", False)),
+    } for model in models if model.get("id")]
+
+def get_enabled_models(models: List[Dict[str, Any]], purpose: str) -> List[Dict[str, Any]]:
+    """Filter the current catalog for one selector purpose."""
+    flag = "translation_enabled" if purpose == "translation" else "generation_enabled"
+    return [model for model in merge_model_configurations(models) if model.get(flag)]
+
+def save_model_configurations(configurations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Upsert the shared enablement flags for each supplied model ID."""
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    records = []
+    for config in configurations:
+        model_id = str(config.get("model_id", "")).strip()
+        if not model_id:
+            continue
+        records.append({
+            "model_id": model_id,
+            "generation_enabled": bool(config.get("generation_enabled", False)),
+            "translation_enabled": bool(config.get("translation_enabled", False)),
+            "updated_at": now,
+        })
+
+    by_id = {row["model_id"]: row for row in _in_memory_db["model_configs"]}
+    for record in records:
+        by_id[record["model_id"]] = {**by_id.get(record["model_id"], {}), **record}
+    _in_memory_db["model_configs"] = list(by_id.values())
+
+    client = _get_persistence_client("model configuration save")
+    if client and records:
+        try:
+            client.table("model_configs").upsert(records, on_conflict="model_id").execute()
+        except Exception as e:
+            if _supabase_is_configured():
+                _raise_persistence_error("model configuration save", e)
+            print(f"Supabase model config save error: {e}")
+    return get_model_configurations()
 
 def get_settings() -> Dict[str, Any]:
     default_settings = {

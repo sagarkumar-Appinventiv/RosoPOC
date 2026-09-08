@@ -1,46 +1,16 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   fetchHistory, fetchComparisonRuns, fetchComparisonLanguages, fetchTranslationLanguages, fetchTranslationComparisonRuns,
   getCachedHistory, getCachedComparisonRuns, getCachedComparisonLanguages
 } from '../services/api';
 import type { HistoryRun } from '../types';
 import { Check, Layers, Loader2 } from 'lucide-react';
+import StructuredContent from '../components/StructuredContent';
 
-const renderValue = (v: any) => {
-  if (v == null) return '—';
-  if (typeof v === 'string') return v;
-  return JSON.stringify(v);
-};
-
-const formatLabel = (key: string) => key.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
-
-const StructuredContent: React.FC<{ value: any }> = ({ value }) => {
-  if (value == null) return <span style={{ color: '#94A3B8' }}>—</span>;
-  if (typeof value !== 'object') return <span>{String(value)}</span>;
-
-  if (Array.isArray(value)) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-        {value.map((item, index) => (
-          <div key={index} style={{ display: 'grid', gridTemplateColumns: '24px minmax(0, 1fr)', gap: '8px', alignItems: 'start' }}>
-            <span style={{ color: '#64748B', fontWeight: 800 }}>{index + 1}.</span>
-            <div style={{ minWidth: 0 }}><StructuredContent value={item} /></div>
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-      {Object.entries(value).map(([key, item]) => (
-        <div key={key} style={{ borderBottom: '1px solid #E2E8F0', paddingBottom: '10px' }}>
-          <div style={{ fontSize: '11px', fontWeight: 800, color: '#475569', marginBottom: '5px' }}>{formatLabel(key)}</div>
-          <div style={{ color: '#1E293B', lineHeight: 1.55 }}><StructuredContent value={item} /></div>
-        </div>
-      ))}
-    </div>
-  );
+const renderValue = (value: any) => {
+  if (value == null) return '—';
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
 };
 
 export const ModelComparisonPage: React.FC = () => {
@@ -64,6 +34,9 @@ export const ModelComparisonPage: React.FC = () => {
   const [translationRuns, setTranslationRuns] = useState<any[]>([]);
   const [selectedTranslationIds, setSelectedTranslationIds] = useState<string[]>([]);
   const [comparedTranslations, setComparedTranslations] = useState<any[]>([]);
+  const generationComparisonRef = useRef<HTMLDivElement>(null);
+  const translationComparisonRef = useRef<HTMLDivElement>(null);
+  const [translationRunsLoading, setTranslationRunsLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -84,11 +57,26 @@ export const ModelComparisonPage: React.FC = () => {
 
   useEffect(() => {
     if (comparisonMode !== 'translation' || !translationLanguage) return;
+    let cancelled = false;
+    setTranslationRunsLoading(true);
+    setRunsError('');
     fetchTranslationComparisonRuns(translationLanguage, translationSourceId || undefined)
-      .then(setTranslationRuns).catch((e) => setRunsError(e.message || 'Unable to load translations.'));
+      .then((data) => { if (!cancelled) setTranslationRuns(data); })
+      .catch((e) => { if (!cancelled) setRunsError(e.message || 'Unable to load translations.'); })
+      .finally(() => { if (!cancelled) setTranslationRunsLoading(false); });
     setSelectedTranslationIds([]);
     setComparedTranslations([]);
+    return () => { cancelled = true; };
   }, [comparisonMode, translationLanguage, translationSourceId]);
+
+  useEffect(() => {
+    if (comparisonMode === 'generation' && compared.length > 0) {
+      generationComparisonRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    if (comparisonMode === 'translation' && comparedTranslations.length > 0) {
+      translationComparisonRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [comparisonMode, compared, comparedTranslations]);
 
   const renderTranslationComparison = () => (
     <>
@@ -100,7 +88,12 @@ export const ModelComparisonPage: React.FC = () => {
           <button className="btn-primary" disabled={selectedTranslationIds.length < 2} onClick={() => setComparedTranslations(translationRuns.filter((run) => selectedTranslationIds.includes(run.id)))}>Compare Selected ({selectedTranslationIds.length})</button>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '16px', marginTop: '20px' }}>
-          {translationRuns.map((run) => {
+          {translationRunsLoading ? (
+            <div style={{ gridColumn: '1 / -1', padding: '40px', textAlign: 'center', color: '#64748B', border: '1px dashed #CBD5E1', borderRadius: '8px' }}>
+              <Loader2 size={28} className="animate-spin" color="#2563EB" />
+              <div style={{ marginTop: '10px', fontSize: '13px' }}>Loading translation comparisons...</div>
+            </div>
+          ) : translationRuns.map((run) => {
             const checked = selectedTranslationIds.includes(run.id);
             const sourceId = run.source_batch_id || run.source_generation_id || '';
             return <div key={run.id} onClick={() => setSelectedTranslationIds((prev) => prev.includes(run.id) ? prev.filter((id) => id !== run.id) : [...prev, run.id])} style={{ border: `2px solid ${checked ? '#2563EB' : '#E2E8F0'}`, padding: '16px', borderRadius: '8px', cursor: 'pointer' }}><strong>{run.model_name}</strong><div style={{ fontSize: '12px', color: '#64748B', marginTop: '8px' }}>Source: {sourceId.substring(0, 8)} · {run.status}</div></div>;
@@ -108,7 +101,7 @@ export const ModelComparisonPage: React.FC = () => {
         </div>
       </div>
       {comparedTranslations.length > 0 && (
-        <div className="card" style={{ padding: '24px 28px' }}>
+        <div ref={translationComparisonRef} className="card" style={{ padding: '24px 28px', scrollMarginTop: '24px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', gap: '16px', flexWrap: 'wrap' }}>
             <div>
               <h3 style={{ fontSize: '16px', fontWeight: 800, margin: 0 }}>Translation Comparison</h3>
@@ -151,7 +144,7 @@ export const ModelComparisonPage: React.FC = () => {
                       <h5 style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#2563EB', margin: 0 }}>{translationLanguage} Translation</h5>
                     </div>
                     <div style={{ margin: 0, padding: '14px', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: '8px', fontSize: '12px', maxHeight: '520px', overflowY: 'auto' }}>
-                      <StructuredContent value={run.translated_content} />
+                      <StructuredContent value={run.translated_content ?? run.output_json} />
                     </div>
                   </section>
                 </div>
@@ -361,7 +354,7 @@ export const ModelComparisonPage: React.FC = () => {
       </div>
 
       {compared.length > 0 && (
-        <div className="card">
+        <div ref={generationComparisonRef} className="card" style={{ scrollMarginTop: '24px' }}>
           <h3 style={{ fontSize: '16px', fontWeight: 800, marginBottom: '16px' }}>Side-by-Side Comparison</h3>
           {legacyMode ? (
             <div style={{ display: 'grid', gridTemplateColumns: `repeat(${compared.length}, minmax(280px, 1fr))`, gap: '16px' }}>

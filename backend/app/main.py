@@ -1,7 +1,7 @@
 import json
 import uuid
 from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Header, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -16,7 +16,8 @@ from app.database import (
     get_verification_results_for_field, get_test_run, get_batch, get_batch_field_jobs, get_comparison_batches,
     get_latest_field_jobs, get_storage_health, get_translation_sources, create_translation,
     update_translation, get_translation_history, get_translation, get_translation_languages,
-    get_translation_comparisons
+    get_translation_comparisons, merge_model_configurations, get_enabled_models,
+    save_model_configurations
 )
 from app.verification import verify_all_parameters, targeted_regeneration
 from app.prompt_compiler import compile_batch_prompts
@@ -88,6 +89,14 @@ class GenerateTranslationRequest(BaseModel):
     model_id: str
     additional_prompt: Optional[str] = ""
 
+class ModelConfiguration(BaseModel):
+    model_id: str
+    generation_enabled: bool = False
+    translation_enabled: bool = False
+
+class ModelConfigurationUpdate(BaseModel):
+    models: List[ModelConfiguration]
+
 class RerunFieldRequest(BaseModel):
     pass
 
@@ -121,8 +130,20 @@ def auth_verify(payload: AuthVerifyRequest):
     raise HTTPException(status_code=401, detail="Invalid OpenRouter API key. Please check your key and try again.")
 
 @app.get("/api/models")
-def get_models(token: str = Depends(verify_session_token)):
-    return fetch_openrouter_models(api_key=token)
+def get_models(purpose: Optional[str] = Query(None), token: str = Depends(verify_session_token)):
+    models = fetch_openrouter_models(api_key=token)
+    if purpose in {"generation", "translation"}:
+        return get_enabled_models(models, purpose)
+    return models
+
+@app.get("/api/models/config")
+def get_model_config(token: str = Depends(verify_session_token)):
+    return merge_model_configurations(fetch_openrouter_models(api_key=token))
+
+@app.post("/api/models/config")
+def save_model_config(payload: ModelConfigurationUpdate, token: str = Depends(verify_session_token)):
+    save_model_configurations([model.dict() for model in payload.models])
+    return merge_model_configurations(fetch_openrouter_models(api_key=token))
 
 class TestRunGetOrCreateRequest(BaseModel):
     country: str = "France"

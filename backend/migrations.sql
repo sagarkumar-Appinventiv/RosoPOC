@@ -2,6 +2,19 @@
 -- Run this in Supabase Dashboard → SQL Editor.
 -- Idempotent: safe to run multiple times.
 
+-- 0. model_configs: shared Generation/Translation selector allowlist
+CREATE TABLE IF NOT EXISTS model_configs (
+	model_id TEXT PRIMARY KEY,
+	generation_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+	translation_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_configs_generation_enabled
+	ON model_configs(generation_enabled);
+CREATE INDEX IF NOT EXISTS idx_model_configs_translation_enabled
+	ON model_configs(translation_enabled);
+
 -- 1. batches: Semantic Consistency Planner result
 ALTER TABLE batches ADD COLUMN IF NOT EXISTS plan_json JSONB;
 ALTER TABLE batches ADD COLUMN IF NOT EXISTS progress_phase TEXT DEFAULT 'initializing';
