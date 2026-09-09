@@ -1,10 +1,19 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { fetchHistory, getCachedHistory, fetchTranslationHistory, getCachedTranslationHistory } from '../services/api';
 import type { HistoryRun, TranslationRun } from '../types';
 import { Search, Loader2 } from 'lucide-react';
 import { RunDetailDrawer } from '../components/RunDetailDrawer';
 
 const normalizeStatus = (s: string) => (s || '').toLowerCase().replace(/_/g, ' ');
+const recentFirst = <T extends { created_at?: string; date?: string }>(records: T[]) => (
+  [...records]
+    .sort((a, b) => {
+      const aTime = Date.parse(a.created_at || a.date || '') || 0;
+      const bTime = Date.parse(b.created_at || b.date || '') || 0;
+      return bTime - aTime;
+    })
+    .slice(0, 15)
+);
 
 export const HistoryPage: React.FC = () => {
   // Seed from the tab-level cache so already-fetched data renders instantly
@@ -37,10 +46,12 @@ export const HistoryPage: React.FC = () => {
     return () => { cancelled = true; };
   }, []);
 
-  const uniqueModels = Array.from(new Set((viewMode === 'generation' ? history.map((h) => h.model || h.model_id) : translations.map((t) => t.model_name || t.model_id)))).filter(Boolean);
-  const uniqueLanguages = Array.from(new Set(history.map((h) => h.language).filter(Boolean))).sort();
+  const recentHistory = useMemo(() => recentFirst(history), [history]);
+  const recentTranslations = useMemo(() => recentFirst(translations), [translations]);
+  const uniqueModels = Array.from(new Set((viewMode === 'generation' ? recentHistory.map((h) => h.model || h.model_id) : recentTranslations.map((t) => t.model_name || t.model_id)))).filter(Boolean);
+  const uniqueLanguages = Array.from(new Set(recentHistory.map((h) => h.language).filter(Boolean))).sort();
 
-  const filteredHistory = history.filter((run) => {
+  const filteredHistory = recentHistory.filter((run) => {
     const matchesSearch =
       (run.run_id || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
       (run.city || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -55,8 +66,8 @@ export const HistoryPage: React.FC = () => {
     
     return matchesSearch && matchesModel && matchesStatus && matchesLanguage;
   });
-  const translationLanguages = Array.from(new Set(translations.map((run) => run.target_language))).sort();
-  const filteredTranslations = translations.filter((run) => {
+  const translationLanguages = Array.from(new Set(recentTranslations.map((run) => run.target_language))).sort();
+  const filteredTranslations = recentTranslations.filter((run) => {
     const term = searchTerm.toLowerCase();
     return (!term || run.id.toLowerCase().includes(term) || run.model_name.toLowerCase().includes(term) || (run.target_language || '').toLowerCase().includes(term))
       && (modelFilter === 'All Models' || run.model_name === modelFilter || run.model_id === modelFilter)
@@ -64,7 +75,7 @@ export const HistoryPage: React.FC = () => {
       && (languageFilter === 'All Languages' || run.target_language === languageFilter);
   });
   const displayedCount = viewMode === 'generation' ? filteredHistory.length : filteredTranslations.length;
-  const totalCount = viewMode === 'generation' ? history.length : translations.length;
+  const totalCount = viewMode === 'generation' ? recentHistory.length : recentTranslations.length;
 
   return (
     <div className="workspace-container">
@@ -90,7 +101,7 @@ export const HistoryPage: React.FC = () => {
 
           {/* Model Filter */}
           <select className="select-input" value={modelFilter} onChange={(e) => setModelFilter(e.target.value)} style={{ width: '180px' }}>
-            <option value="All Models">All Models ({history.length})</option>
+            <option value="All Models">All Models ({totalCount})</option>
             {uniqueModels.map((m) => (
               <option key={m} value={m}>{m}</option>
             ))}
@@ -151,7 +162,7 @@ export const HistoryPage: React.FC = () => {
                   <td style={{ fontSize: '12px', color: '#64748B' }}>{new Date(run.created_at).toLocaleString()}</td>
                   <td><button className="btn-secondary" style={{ padding: '4px 12px', fontSize: '12px', color: '#2563EB', fontWeight: 700 }} onClick={() => setSelectedTranslationId(run.id)}>View Details</button></td>
                 </tr>
-              )) : <tr><td colSpan={9} style={{ textAlign: 'center', padding: '32px', color: '#64748B' }}>{translations.length === 0 ? 'No translations generated yet.' : 'No translations match your filters.'}</td></tr>) : filteredHistory.length > 0 ? (
+              )) : <tr><td colSpan={9} style={{ textAlign: 'center', padding: '32px', color: '#64748B' }}>{recentTranslations.length === 0 ? 'No translations generated yet.' : 'No translations match your filters.'}</td></tr>) : filteredHistory.length > 0 ? (
                 filteredHistory.map((run, idx) => {
                   const dateStr = run.created_at || run.date;
                   return (
@@ -198,7 +209,7 @@ export const HistoryPage: React.FC = () => {
               ) : (
                 <tr>
                   <td colSpan={9} style={{ textAlign: 'center', padding: '32px', color: '#64748B', fontSize: '13px' }}>
-                    {history.length === 0
+                    {recentHistory.length === 0
                       ? "No content generation runs logged yet. Generate content to populate history!"
                       : "No runs match your search filters."}
                   </td>
